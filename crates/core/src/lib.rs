@@ -4,4 +4,5 @@ pub mod export;
 pub mod format;
 pub mod kind;
 pub mod scan;
+pub mod trash;
 pub mod tree;
