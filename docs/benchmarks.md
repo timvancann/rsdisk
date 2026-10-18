@@ -28,5 +28,16 @@ Reading it:
   so the kernel's directory and stat calls are the bottleneck. `getattrlistbulk` (§3.2) is
   the lever if this ever needs to get faster.
 
-Cold cache not measured yet: it needs `sudo purge` before each run, e.g.
-`hyperfine -N -i --runs 3 --prepare 'sudo purge' 'dua aggregate ~' './target/release/rsdisk-core scan ~'`.
+Cold cache, run by Tim in his own terminal tab (sudo needs a TTY):
+`hyperfine -N -i --runs 3 --prepare 'sudo -n purge' 'dua aggregate /Users/timvancann' './target/release/rsdisk-core scan /Users/timvancann'`
+
+| Command | Mean | ± σ | Min | Max | Peak memory |
+|---|---|---|---|---|---|
+| `dua aggregate ~` | 13.34 s | 0.06 s | 13.27 s | 13.38 s | 39 MiB |
+| `rsdisk-core scan ~` | 17.21 s | 0.50 s | 16.81 s | 17.77 s | 730 MiB |
+
+**rsdisk is 29% slower here: the target is missed.** dua's cold runs beat its own warm runs
+(13.3 s against 16.1 s), which suggests the warm table was skewed by load on the machine (two
+agents were compiling at the time) and the cold table is the more honest one. Its tight
+spread agrees. A quiet warm rerun should confirm. The doubled system time (about 170 s
+against dua's 77 s) is where the gap lives; see the follow-up in plan 01.
