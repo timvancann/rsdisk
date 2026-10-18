@@ -2,3 +2,4 @@
 //! the views only draw them and forward input.
 
 pub mod settings;
+pub mod theme;
