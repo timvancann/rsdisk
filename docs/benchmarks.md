@@ -57,3 +57,11 @@ walk finishes at 13.0 s (faster than dua), building the tree takes 0.1 s, and fi
 489 directories couldn't be opened takes 1.7 s. dua-core's error doesn't carry the path, so
 rsdisk re-opens the 12.5k entered-but-empty directories; the cost is the privacy (TCC)
 denials, which are slow every time, not the number of directories.
+
+**Follow-up (same day):** that search now runs after the result is reported
+(`locate_unreadable`, spec §3.2), so the scan is done when the walk is. Four alternating
+pairs on a busier machine, scan time as `rsdisk-core` prints it against dua's wall time:
+dua 20.37 / 19.46 / 17.29 / 17.99 s (mean 18.78), rsdisk 21.42 / 18.51 / 20.45 / 19.15 s
+(mean 19.88), so about 6% behind under load. The quiet-machine phase timing above (walk done
+at 13.0 s against dua's 14.3 s) suggests level or slightly ahead when the machine is idle.
+Inside the §3.14 target either way.

@@ -1,6 +1,6 @@
 use clap::{Parser, Subcommand};
 use rsdisk_core::format;
-use rsdisk_core::scan::{Progress, ScanOptions, scan};
+use rsdisk_core::scan::{Progress, ScanOptions, locate_unreadable, scan};
 use std::path::PathBuf;
 
 /// Scan a folder and report where the disk space went.
@@ -29,9 +29,9 @@ fn scan_command(path: Option<PathBuf>) {
     let root = path.unwrap_or_else(|| home.clone());
     let root = std::path::absolute(&root).unwrap_or(root);
     let progress = Progress::default();
-    let result = scan(&root, &ScanOptions::for_home(&home), &progress);
+    let mut result = scan(&root, &ScanOptions::for_home(&home), &progress);
     let node = result.tree.node(result.tree.root());
-    let at_least = if result.errors.is_empty() {
+    let at_least = if result.error_count() == 0 {
         ""
     } else {
         "at least "
@@ -45,6 +45,7 @@ fn scan_command(path: Option<PathBuf>) {
         progress.dirs.load(std::sync::atomic::Ordering::Relaxed)
     );
     println!("  time   {:.2?}", result.elapsed);
+    locate_unreadable(&mut result);
     if !result.errors.is_empty() {
         println!(
             "  {} folders or files couldn't be read",

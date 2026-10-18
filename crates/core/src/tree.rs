@@ -117,21 +117,6 @@ impl TreeBuilder {
         first
     }
 
-    pub fn node_mut(&mut self, id: NodeId) -> &mut Node {
-        &mut self.nodes[id as usize]
-    }
-
-    /// Directories with no children and none of the `exclude` flags, with their paths.
-    pub fn childless_dirs(&self, exclude: u8) -> Vec<(NodeId, PathBuf)> {
-        (0..self.nodes.len() as NodeId)
-            .filter(|id| {
-                let n = &self.nodes[*id as usize];
-                n.is_dir() && n.child_len == 0 && !n.has(exclude)
-            })
-            .map(|id| (id, path_of(&self.nodes, id)))
-            .collect()
-    }
-
     pub fn finish(mut self) -> Tree {
         // Children always have higher ids than their parent, so one reverse pass rolls every
         // subtree up before its parent is read.
@@ -192,6 +177,21 @@ impl Tree {
 
     pub fn path(&self, id: NodeId) -> PathBuf {
         path_of(&self.nodes, id)
+    }
+
+    pub fn node_mut(&mut self, id: NodeId) -> &mut Node {
+        &mut self.nodes[id as usize]
+    }
+
+    /// Directories with no children and none of the `exclude` flags, with their paths.
+    pub fn childless_dirs(&self, exclude: u8) -> Vec<(NodeId, PathBuf)> {
+        (0..self.nodes.len() as NodeId)
+            .filter(|id| {
+                let n = &self.nodes[*id as usize];
+                n.is_dir() && n.child_len == 0 && !n.has(exclude)
+            })
+            .map(|id| (id, self.path(id)))
+            .collect()
     }
 
     /// Detaches `id` from the tree and subtracts its size and file count from every ancestor.

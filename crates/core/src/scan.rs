@@ -69,6 +69,16 @@ pub struct ScanResult {
     pub errors: Vec<ScanError>,
     pub elapsed: Duration,
     pub cancelled: bool,
+    /// Directories that couldn't be opened but aren't in `errors` or flagged yet, because the
+    /// walk doesn't say which ones they were. `locate_unreadable` finds them.
+    pub unlocated: usize,
+}
+
+impl ScanResult {
+    /// Every error, counting the unlocated ones.
+    pub fn error_count(&self) -> usize {
+        self.errors.len() + self.unlocated
+    }
 }
 
 /// Whether an entry on `dev` lies on another volume than the scan root.
@@ -125,7 +135,7 @@ pub fn scan(root: &Path, opts: &ScanOptions, progress: &Progress) -> ScanResult 
         }
         let entry = match item {
             Ok(e) => e,
-            // A directory that couldn't be opened; dua-core doesn't say which (see `locate`).
+            // A directory that couldn't be opened; dua-core doesn't say which (see `locate_unreadable`).
             Err(_) => {
                 open_failures += 1;
                 continue;
@@ -184,17 +194,14 @@ pub fn scan(root: &Path, opts: &ScanOptions, progress: &Progress) -> ScanResult 
     let Some(root_node) = root_node else {
         return finish_early(root, flag::DIR, None, start, cancelled);
     };
-    let mut tree_nodes = build(root_node, pending, count as usize);
-    if open_failures > 0 {
-        locate(&mut tree_nodes, &mut errors);
-    }
-    let tree = tree_nodes.finish();
+    let tree = build(root_node, pending, count as usize).finish();
     errors.sort_by(|a, b| a.path.cmp(&b.path));
     ScanResult {
         tree,
         errors,
         elapsed: start.elapsed(),
         cancelled,
+        unlocated: open_failures,
     }
 }
 
@@ -260,11 +267,17 @@ fn build(root: Pending, mut pending: Vec<Vec<Pending>>, count: usize) -> TreeBui
     builder
 }
 
-/// Finds the directories dua-core couldn't open. Its error carries no path, so look among the
-/// entered directories that came back empty and try opening each again.
-fn locate(builder: &mut TreeBuilder, errors: &mut Vec<ScanError>) {
-    let not_entered = flag::OTHER_VOLUME | flag::UNREADABLE | flag::NOT_SCANNED;
-    let failed: Vec<(NodeId, PathBuf, String)> = builder
+/// Finds the directories the walk couldn't open, flags them and adds them to the errors.
+/// dua-core's error carries no path, so this re-opens every entered directory that came back
+/// empty. It takes a second or two when macOS privacy settings block many folders, which is
+/// why `scan` leaves it to the caller to run after showing the result (spec §3.2).
+pub fn locate_unreadable(result: &mut ScanResult) {
+    if result.unlocated == 0 {
+        return;
+    }
+    let not_entered = flag::OTHER_VOLUME | flag::UNREADABLE | flag::NOT_SCANNED | flag::REMOVED;
+    let failed: Vec<(NodeId, PathBuf, String)> = result
+        .tree
         .childless_dirs(not_entered)
         .into_par_iter()
         .filter_map(|(id, path)| match fs::read_dir(&path) {
@@ -273,9 +286,11 @@ fn locate(builder: &mut TreeBuilder, errors: &mut Vec<ScanError>) {
         })
         .collect();
     for (id, path, message) in failed {
-        builder.node_mut(id).flags |= flag::UNREADABLE;
-        errors.push(ScanError { path, message });
+        result.tree.node_mut(id).flags |= flag::UNREADABLE;
+        result.errors.push(ScanError { path, message });
     }
+    result.unlocated = 0;
+    result.errors.sort_by(|a, b| a.path.cmp(&b.path));
 }
 
 fn finish_early(
@@ -297,6 +312,7 @@ fn finish_early(
             .collect(),
         elapsed: start.elapsed(),
         cancelled,
+        unlocated: 0,
     }
 }
 
@@ -400,10 +416,16 @@ mod tests {
         let locked = t.path().join("locked");
         write(&locked.join("secret"), 100);
         fs::set_permissions(&locked, fs::Permissions::from_mode(0o000)).unwrap();
-        let (r, _) = run(t.path(), &ScanOptions::default());
-        fs::set_permissions(&locked, fs::Permissions::from_mode(0o755)).unwrap();
+        let (mut r, _) = run(t.path(), &ScanOptions::default());
         let id = find(&r.tree, &locked).unwrap();
+        assert_eq!(r.unlocated, 1);
+        assert_eq!(r.error_count(), 1);
+        assert!(!r.tree.node(id).has(flag::UNREADABLE));
+
+        locate_unreadable(&mut r);
+        fs::set_permissions(&locked, fs::Permissions::from_mode(0o755)).unwrap();
         assert!(r.tree.node(id).has(flag::UNREADABLE));
+        assert_eq!(r.unlocated, 0);
         assert_eq!(r.errors.len(), 1);
         assert_eq!(r.errors[0].path, locked);
     }
@@ -414,7 +436,8 @@ mod tests {
         let locked = t.path().join("locked");
         fs::create_dir_all(&locked).unwrap();
         fs::set_permissions(&locked, fs::Permissions::from_mode(0o000)).unwrap();
-        let (r, _) = run(t.path(), &ScanOptions::default());
+        let (mut r, _) = run(t.path(), &ScanOptions::default());
+        locate_unreadable(&mut r);
         fs::set_permissions(&locked, fs::Permissions::from_mode(0o755)).unwrap();
         let empty = find(&r.tree, &t.path().join("empty")).unwrap();
         assert!(!r.tree.node(empty).has(flag::UNREADABLE));

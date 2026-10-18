@@ -97,8 +97,11 @@ which sits behind a small trait so tests can run without touching the real Trash
 - Progress: shared atomic counters (files, dirs, bytes) plus a slot holding a recent path,
   which the UI polls a few times a second. Cancelling sets an atomic flag; the scanning thread
   stops consuming and dropping the walk stops its workers.
-- dua-core reports a directory it couldn't open without saying which one. Those are found
-  afterwards by re-opening the entered directories that came back empty.
+- dua-core reports a directory it couldn't open without saying which one. The scan result
+  carries their count (`unlocated`), and `locate_unreadable` finds them afterwards by
+  re-opening the entered directories that came back empty. That takes a second or two when
+  macOS privacy settings block many folders, so callers run it after showing the result: the
+  CLI after printing the totals, the GUI in the background while you browse.
 - Result: the size tree (§3.3) and the list of errors.
 
 ### 3.3 Size tree
