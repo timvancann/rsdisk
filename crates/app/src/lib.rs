@@ -2,6 +2,7 @@
 //! the views only draw them and forward input.
 
 pub mod browser;
+pub mod colour;
 pub mod keys;
 mod list_view;
 mod scanning;
