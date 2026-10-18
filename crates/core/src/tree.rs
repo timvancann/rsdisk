@@ -6,7 +6,7 @@
 //! `order[child_start..child_start + child_len]`. That keeps a node at 48 bytes with no
 //! per-directory allocation.
 
-use crate::kind::Kind;
+use crate::kind::{Kind, kind_of};
 use std::path::PathBuf;
 
 pub type NodeId = u32;
@@ -138,10 +138,12 @@ impl TreeBuilder {
                     .cmp(&self.nodes[*a as usize].size)
             });
         }
-        Tree {
+        let mut tree = Tree {
             nodes: self.nodes,
             order,
-        }
+        };
+        tree.summarize();
+        tree
     }
 }
 
@@ -192,6 +194,79 @@ impl Tree {
             })
             .map(|id| (id, self.path(id)))
             .collect()
+    }
+
+    /// Gives every directory the kind holding most of the bytes below it (Other when it holds
+    /// none) and the size-weighted mean modified time of those files (0 when none), so the
+    /// visuals can colour folders (spec §3.6). An app bundle stays App and counts as App
+    /// bytes for its parents. Runs in `finish`; run it again after removals.
+    pub fn summarize(&mut self) {
+        #[derive(Clone, Copy, Default)]
+        struct Acc {
+            bytes: [u64; 8],
+            dated: u128,
+            weight: u64,
+        }
+        let mut slot = vec![u32::MAX; self.nodes.len()];
+        let mut accs: Vec<Acc> = Vec::new();
+        for (i, n) in self.nodes.iter().enumerate() {
+            if n.is_dir() {
+                slot[i] = accs.len() as u32;
+                accs.push(Acc::default());
+            }
+        }
+        for id in (0..self.nodes.len()).rev() {
+            let n = &self.nodes[id];
+            if n.has(flag::REMOVED) {
+                continue;
+            }
+            let mine = if n.is_dir() {
+                let acc = accs[slot[id] as usize];
+                let bundle = kind_of(&n.name) == Kind::App;
+                let kind = if bundle {
+                    Kind::App
+                } else {
+                    let (best, bytes) =
+                        acc.bytes.iter().enumerate().fold((7, 0), |best, (k, b)| {
+                            if *b > best.1 { (k, *b) } else { best }
+                        });
+                    if bytes == 0 {
+                        Kind::Other
+                    } else {
+                        Kind::ALL[best]
+                    }
+                };
+                let mtime = (acc.dated / acc.weight.max(1) as u128) as u32;
+                let n = &mut self.nodes[id];
+                n.kind = kind;
+                n.mtime = if acc.weight == 0 { 0 } else { mtime };
+                if bundle {
+                    let mut flat = Acc::default();
+                    flat.bytes[Kind::App as usize] = acc.bytes.iter().sum();
+                    flat.dated = acc.dated;
+                    flat.weight = acc.weight;
+                    flat
+                } else {
+                    acc
+                }
+            } else {
+                let mut acc = Acc::default();
+                acc.bytes[n.kind as usize] = n.size;
+                if n.mtime > 0 {
+                    acc.dated = n.mtime as u128 * n.size as u128;
+                    acc.weight = n.size;
+                }
+                acc
+            };
+            if let Some(p) = self.nodes[id].parent() {
+                let p = &mut accs[slot[p as usize] as usize];
+                for (total, b) in p.bytes.iter_mut().zip(mine.bytes) {
+                    *total += b;
+                }
+                p.dated += mine.dated;
+                p.weight += mine.weight;
+            }
+        }
     }
 
     /// Detaches `id` from the tree and subtracts its size and file count from every ancestor.
@@ -299,6 +374,89 @@ mod tests {
     #[test]
     fn mtime_before_1970_clamps_to_zero() {
         assert_eq!(Node::new("old", 0, -5, Kind::Other, 0).mtime, 0);
+    }
+
+    fn typed(name: &str, size: u64, kind: Kind, mtime: i64) -> Node {
+        Node::new(name, size, mtime, kind, 0)
+    }
+
+    /// /r { media { a.mov:100 @1000, b.jpg:10 @2000, c.jpg:10, d.jpg:10 }, empty {},
+    ///      Tool.app { bin:500 @3000 }, notes.txt:1 }
+    fn kinds() -> (Tree, [NodeId; 3]) {
+        let mut b = TreeBuilder::new(dir("/r"));
+        let media = b.add_children(
+            0,
+            [
+                dir("media"),
+                dir("empty"),
+                dir("Tool.app"),
+                typed("notes.txt", 1, Kind::Document, 0),
+            ],
+        );
+        let (empty, app) = (media + 1, media + 2);
+        b.add_children(
+            media,
+            [
+                typed("a.mov", 100, Kind::Video, 1000),
+                typed("b.jpg", 10, Kind::Image, 2000),
+                typed("c.jpg", 10, Kind::Image, 0),
+                typed("d.jpg", 10, Kind::Image, 0),
+            ],
+        );
+        b.add_children(app, [typed("bin", 500, Kind::Other, 3000)]);
+        (b.finish(), [media, empty, app])
+    }
+
+    #[test]
+    fn folders_take_the_kind_with_most_bytes_not_most_files() {
+        let (t, [media, ..]) = kinds();
+        assert_eq!(t.node(media).kind, Kind::Video);
+    }
+
+    #[test]
+    fn empty_folders_are_other_and_undated() {
+        let (t, [_, empty, _]) = kinds();
+        assert_eq!(t.node(empty).kind, Kind::Other);
+        assert_eq!(t.node(empty).mtime, 0);
+    }
+
+    #[test]
+    fn folder_age_is_weighted_by_size_and_ignores_undated_files() {
+        let (t, [media, ..]) = kinds();
+        // (100 * 1000 + 10 * 2000) / 110
+        assert_eq!(t.node(media).mtime, 1090);
+    }
+
+    #[test]
+    fn app_bundles_stay_app_and_count_as_app_upward() {
+        let (t, [_, _, app]) = kinds();
+        assert_eq!(t.node(app).kind, Kind::App);
+        assert_eq!(t.node(t.root()).kind, Kind::App);
+    }
+
+    #[test]
+    fn ties_go_to_the_first_kind() {
+        let mut b = TreeBuilder::new(dir("/r"));
+        b.add_children(
+            0,
+            [
+                typed("x.png", 5, Kind::Image, 0),
+                typed("y.mov", 5, Kind::Video, 0),
+            ],
+        );
+        assert_eq!(b.finish().node(0).kind, Kind::Video);
+    }
+
+    #[test]
+    fn summarize_after_removal_leaves_removed_nodes_out() {
+        let (mut t, [media, _, app]) = kinds();
+        t.remove(app);
+        let movie = t.children(media)[0];
+        t.remove(movie);
+        t.summarize();
+        assert_eq!(t.node(media).kind, Kind::Image);
+        assert_eq!(t.node(media).mtime, 2000);
+        assert_eq!(t.node(t.root()).kind, Kind::Image);
     }
 
     #[test]

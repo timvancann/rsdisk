@@ -138,9 +138,11 @@ about 750 MB during the scan.
 Kind is a pure function of the file name, eight values to match a theme's eight terminal
 colours: video, audio, image, archive (zip, tar, gz, dmg, iso, pkg, ...), document (pdf,
 office formats, text), code (source files and their usual build artifacts), app (`.app`
-bundles, binaries, dylibs), other. Directories have no kind of their own; a visual colours
-them by their contents or neutrally. Age mode colours files by modified time on a single
-ramp from recent to old.
+bundles, binaries, dylibs), other. A directory takes the kind holding most of the bytes below
+it (an `.app` bundle stays App) and the size-weighted mean modified time of the files below
+it, computed in one pass when the tree is built and again after removals (`Tree::summarize`).
+Age mode colours by modified time on a single ramp from recent (teal) through sand to old
+(red, 5 years or more), log scale, as the mockup showed.
 
 ### 3.7 Export and mockup
 
