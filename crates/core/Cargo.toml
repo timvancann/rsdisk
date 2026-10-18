@@ -1,0 +1,19 @@
+[package]
+name = "rsdisk-core"
+edition.workspace = true
+version.workspace = true
+license.workspace = true
+
+[lib]
+name = "rsdisk_core"
+
+[[bin]]
+name = "rsdisk-core"
+path = "src/main.rs"
+
+[dependencies]
+clap = { version = "4", features = ["derive"] }
+rayon = "1"
+
+[dev-dependencies]
+tempfile = "3"
