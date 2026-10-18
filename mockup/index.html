@@ -172,9 +172,6 @@ function colour(n) {
   if (mode === "kind") return n.kind ? KIND_COLOURS[n.kind] : "var(--neutral)";
   return n.meanAge ? ageScale(Math.max(1, (now - n.meanAge) / DAY)) : "var(--neutral)";
 }
-function escape(s) {
-  return s.replace(/[&<>"]/g, c => ({ "&": "&amp;", "<": "&lt;", ">": "&gt;", '"': "&quot;" }[c]));
-}
 function pathOf(n) { return n.ancestors().reverse().map(a => a.data.name).join("/").replace(/^\/\//, "/"); }
 function zoomTo(n) {
   if (!n) return;
@@ -232,7 +229,10 @@ function bind(sel) {
       tip.style.left = Math.min(e.clientX + 14, innerWidth - 430) + "px";
       tip.style.top = (e.clientY + 14) + "px";
       const kind = d.data.other ? "the rest of this folder" : (d.children ? `mostly ${d.kind || "unknown"}` : d.data.kind);
-      tip.innerHTML = `<b>${escape(pathOf(d))}</b><br>${bytes(d.value)}, ${d.data.files.toLocaleString("en-US")} files, ${kind}, ${age(d.children ? d.meanAge : d.data.mtime)}`;
+      const head = document.createElement("b");
+      head.textContent = pathOf(d);
+      tip.replaceChildren(head, document.createElement("br"),
+        `${bytes(d.value)}, ${Number(d.data.files).toLocaleString("en-US")} files, ${kind}, ${age(d.children ? d.meanAge : d.data.mtime)}`);
       if (hovered !== d.id) {
         d3.selectAll(".cell.hover").classed("hover", false);
         d3.selectAll(`.cell[data-id="${d.id}"]`).classed("hover", true);
@@ -372,7 +372,10 @@ addEventListener("resize", () => { clearTimeout(resizeTimer); resizeTimer = setT
 
 // Served over http with ?data=<file>, load it straight away (handy for screenshots).
 const preset = new URLSearchParams(location.search).get("data");
-if (preset) fetch(preset).then(r => r.json()).then(load);
+if (preset) {
+  const url = new URL(preset, location.href);
+  if (url.origin === location.origin) fetch(url).then(r => r.json()).then(load);
+}
 </script>
 </body>
 </html>
