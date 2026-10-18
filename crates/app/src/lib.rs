@@ -6,6 +6,7 @@ pub mod colour;
 pub mod keys;
 pub mod layout;
 mod list_view;
+pub mod marks;
 mod scanning;
 pub mod settings;
 pub mod theme;
