@@ -102,3 +102,16 @@ RSS with `/usr/bin/time -l`, record both with date, machine and file count. Cold
 need `sudo purge`, so leave that command for Tim and note it in the doc.
 **Verify:** warm time within about 10% of dua and peak RSS under 1 GB (§3.14). If not, try
 `getattrlistbulk` (§3.2) as a follow-up task appended to this plan, and record the ruling.
+
+**Outcome:** memory met (730 MiB). Speed missed: cold cache 17.2 s against dua's 13.3 s
+(+29%), with about twice dua's system time. See `docs/benchmarks.md`.
+
+### Task 7: Close the speed gap (not started)
+
+**Approach:** measure before changing anything. Profile a warm scan (`samply` or Instruments)
+to see whether the extra system time is the stat calls themselves (full-path `lstat` per
+entry), rayon threads sleeping and waking on tiny per-entry tasks, or lock contention. Then
+try the matching fix, cheapest first: only spawn tasks for subdirectories; `fstatat` relative
+to an open directory handle; `getattrlistbulk` for a whole directory per call.
+**Verify:** cold and warm `hyperfine` within about 10% of dua on a quiet machine, recorded in
+`docs/benchmarks.md`; all scan tests still green.
