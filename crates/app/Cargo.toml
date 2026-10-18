@@ -1,0 +1,16 @@
+[package]
+name = "rsdisk"
+edition.workspace = true
+version.workspace = true
+license.workspace = true
+
+[dependencies]
+rsdisk-core = { path = "../core" }
+# gpui-kit bundles gpui-pre and gpui-component, both pinned to gpui-pre =0.3.9, plus the
+# macOS platform with font-kit and runtime shaders.
+gpui-kit = { version = "=0.7.3", default-features = false, features = ["component"] }
+serde = { version = "1", features = ["derive"] }
+serde_json = "1"
+
+[dev-dependencies]
+tempfile = "3"
