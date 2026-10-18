@@ -19,6 +19,10 @@ arena; sizes roll up after the walk; atomic counters report progress. No gpui an
 
 01 core scanner, 02 export and mockup. GUI plans (03 onward) are written after the mockup.
 
+**Ruling during execution:** Task 3 (file kinds) ran before Task 2, because a tree node
+stores its kind. The builder takes parents before children (the walk produces them in that
+order anyway), not "any order".
+
 ### Task 1: Workspace skeleton
 
 **Files:** create `Cargo.toml` (workspace), `crates/core/Cargo.toml`, `crates/core/src/lib.rs`,
