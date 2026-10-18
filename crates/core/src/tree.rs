@@ -196,6 +196,68 @@ impl Tree {
             .collect()
     }
 
+    /// Replaces `id`'s contents with a fresh scan of it (`sub`, whose root is `id` scanned
+    /// again): the new nodes are appended, the old ones marked removed, sizes and counts
+    /// updated up to the root, and folder summaries redone. Used for rescans and for scanning
+    /// a skipped cloud folder (spec §3.5).
+    pub fn graft(&mut self, id: NodeId, sub: Tree) {
+        // The old contents leave.
+        let mut stack: Vec<NodeId> = self.children(id).to_vec();
+        while let Some(old) = stack.pop() {
+            stack.extend_from_slice(self.children(old));
+            self.nodes[old as usize].flags |= flag::REMOVED;
+        }
+
+        let base = self.nodes.len() as NodeId;
+        // Sub ids 1.. become base.., and sub's root becomes `id`.
+        let map = |sub_id: NodeId| if sub_id == 0 { id } else { base + sub_id - 1 };
+        let Tree {
+            nodes: sub_nodes,
+            order: sub_order,
+        } = sub;
+        let sub_root = &sub_nodes[0];
+        let (new_size, new_files) = (sub_root.size, sub_root.files);
+        let (child_start, child_len) = (sub_root.child_start, sub_root.child_len);
+        let unreadable = sub_root.flags & flag::UNREADABLE;
+        for mut n in sub_nodes.into_iter().skip(1) {
+            n.parent = map(n.parent);
+            if n.child_len > 0 {
+                n.child_start = map(n.child_start);
+            }
+            self.nodes.push(n);
+        }
+        self.order.extend(sub_order.into_iter().skip(1).map(map));
+
+        let (old_size, old_files) = {
+            let n = &mut self.nodes[id as usize];
+            let old = (n.size, n.files);
+            n.size = new_size;
+            n.files = new_files;
+            n.child_start = if child_len > 0 { map(child_start) } else { 0 };
+            n.child_len = child_len;
+            n.flags = (n.flags & !(flag::NOT_SCANNED | flag::UNREADABLE)) | unreadable;
+            old
+        };
+        let mut at = self.nodes[id as usize].parent();
+        while let Some(p) = at {
+            let n = &mut self.nodes[p as usize];
+            n.size = n.size - old_size + new_size;
+            n.files = n.files - old_files + new_files;
+            at = n.parent();
+        }
+        // Sizes changed all the way up, so each ancestor's siblings may need re-sorting.
+        let mut at = self.nodes[id as usize].parent();
+        while let Some(parent) = at {
+            let p = &self.nodes[parent as usize];
+            let range = p.child_start as usize..(p.child_start + p.child_len) as usize;
+            let nodes = &self.nodes;
+            self.order[range]
+                .sort_unstable_by(|a, b| nodes[*b as usize].size.cmp(&nodes[*a as usize].size));
+            at = p.parent();
+        }
+        self.summarize();
+    }
+
     /// Gives every directory the kind holding most of the bytes below it (Other when it holds
     /// none) and the size-weighted mean modified time of those files (0 when none), so the
     /// visuals can colour folders (spec §3.6). An app bundle stays App and counts as App

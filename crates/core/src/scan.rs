@@ -517,6 +517,73 @@ mod tests {
         assert_eq!(p.dirs.load(Relaxed), 6);
     }
 
+    /// Size and file count of every live node, by path.
+    fn totals(tree: &Tree) -> Vec<(PathBuf, u64, u32)> {
+        let mut out: Vec<(PathBuf, u64, u32)> = Vec::new();
+        let mut stack = vec![tree.root()];
+        while let Some(id) = stack.pop() {
+            let n = tree.node(id);
+            out.push((tree.path(id), n.size, n.files));
+            stack.extend_from_slice(tree.children(id));
+        }
+        out.sort();
+        out
+    }
+
+    fn graft_rescan(r: &mut ScanResult, folder: &Path) {
+        let id = find(&r.tree, folder).unwrap();
+        let sub = scan(folder, &ScanOptions::default(), &Progress::default());
+        r.tree.graft(id, sub.tree);
+    }
+
+    #[test]
+    fn a_grafted_rescan_matches_a_fresh_scan() {
+        let t = sample();
+        let (mut r, _) = run(t.path(), &ScanOptions::default());
+        write(&t.path().join("a/b/new.mov"), 400_000);
+        fs::remove_file(t.path().join("a/b/c/three.rs")).unwrap();
+        graft_rescan(&mut r, &t.path().join("a/b"));
+        let (fresh, _) = run(t.path(), &ScanOptions::default());
+        assert_eq!(totals(&r.tree), totals(&fresh.tree));
+        // Children stay sorted largest first after sizes changed.
+        let a = find(&r.tree, &t.path().join("a")).unwrap();
+        let sizes: Vec<u64> = r
+            .tree
+            .children(a)
+            .iter()
+            .map(|c| r.tree.node(*c).size)
+            .collect();
+        assert!(sizes.windows(2).all(|w| w[0] >= w[1]), "{sizes:?}");
+    }
+
+    #[test]
+    fn grafting_clears_not_scanned_and_works_twice() {
+        let t = sample();
+        let cloud = t.path().join("Library/CloudStorage");
+        write(&cloud.join("GoogleDrive/huge.mov"), 500_000);
+        let (mut r, _) = run(t.path(), &ScanOptions::for_home(t.path()));
+        graft_rescan(&mut r, &cloud);
+        let id = find(&r.tree, &cloud).unwrap();
+        assert!(!r.tree.node(id).has(flag::NOT_SCANNED));
+        assert!(r.tree.node(id).size >= 500_000);
+        graft_rescan(&mut r, &cloud);
+        let (fresh, _) = run(t.path(), &ScanOptions::default());
+        assert_eq!(totals(&r.tree), totals(&fresh.tree));
+    }
+
+    #[test]
+    fn grafting_an_emptied_folder_leaves_no_children() {
+        let t = sample();
+        let (mut r, _) = run(t.path(), &ScanOptions::default());
+        fs::remove_dir_all(t.path().join("d")).unwrap();
+        fs::create_dir(t.path().join("d")).unwrap();
+        graft_rescan(&mut r, &t.path().join("d"));
+        let d = find(&r.tree, &t.path().join("d")).unwrap();
+        assert!(r.tree.children(d).is_empty());
+        let (fresh, _) = run(t.path(), &ScanOptions::default());
+        assert_eq!(totals(&r.tree), totals(&fresh.tree));
+    }
+
     #[test]
     fn a_file_as_root_is_a_one_node_tree() {
         let t = sample();
