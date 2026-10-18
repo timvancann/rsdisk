@@ -272,22 +272,42 @@ fn build(root: Pending, mut pending: Vec<Vec<Pending>>, count: usize) -> TreeBui
 /// empty. It takes a second or two when macOS privacy settings block many folders, which is
 /// why `scan` leaves it to the caller to run after showing the result (spec §3.2).
 pub fn locate_unreadable(result: &mut ScanResult) {
+    let found = probe_unreadable(unreadable_candidates(result));
+    apply_unreadable(result, found);
+}
+
+/// The directories `locate_unreadable` re-opens: none when nothing failed to open.
+pub fn unreadable_candidates(result: &ScanResult) -> Vec<(NodeId, PathBuf)> {
     if result.unlocated == 0 {
-        return;
+        return Vec::new();
     }
     let not_entered = flag::OTHER_VOLUME | flag::UNREADABLE | flag::NOT_SCANNED | flag::REMOVED;
-    let failed: Vec<(NodeId, PathBuf, String)> = result
-        .tree
-        .childless_dirs(not_entered)
+    result.tree.childless_dirs(not_entered)
+}
+
+/// Re-opens each candidate and returns the ones that fail. Touches only the filesystem, so a
+/// GUI can run it off the main thread.
+pub fn probe_unreadable(candidates: Vec<(NodeId, PathBuf)>) -> Vec<(NodeId, ScanError)> {
+    candidates
         .into_par_iter()
         .filter_map(|(id, path)| match fs::read_dir(&path) {
             Ok(_) => None,
-            Err(e) => Some((id, path, e.to_string())),
+            Err(e) => Some((
+                id,
+                ScanError {
+                    path,
+                    message: e.to_string(),
+                },
+            )),
         })
-        .collect();
-    for (id, path, message) in failed {
+        .collect()
+}
+
+/// Flags what `probe_unreadable` found and moves it into the errors.
+pub fn apply_unreadable(result: &mut ScanResult, found: Vec<(NodeId, ScanError)>) {
+    for (id, error) in found {
         result.tree.node_mut(id).flags |= flag::UNREADABLE;
-        result.errors.push(ScanError { path, message });
+        result.errors.push(error);
     }
     result.unlocated = 0;
     result.errors.sort_by(|a, b| a.path.cmp(&b.path));
@@ -428,6 +448,25 @@ mod tests {
         assert_eq!(r.unlocated, 0);
         assert_eq!(r.errors.len(), 1);
         assert_eq!(r.errors[0].path, locked);
+    }
+
+    #[test]
+    fn probe_then_apply_matches_locate() {
+        let t = sample();
+        let locked = t.path().join("locked");
+        write(&locked.join("secret"), 100);
+        fs::set_permissions(&locked, fs::Permissions::from_mode(0o000)).unwrap();
+        let (mut whole, _) = run(t.path(), &ScanOptions::default());
+        let (mut split, _) = run(t.path(), &ScanOptions::default());
+        locate_unreadable(&mut whole);
+        let found = probe_unreadable(unreadable_candidates(&split));
+        apply_unreadable(&mut split, found);
+        fs::set_permissions(&locked, fs::Permissions::from_mode(0o755)).unwrap();
+        let paths = |r: &ScanResult| r.errors.iter().map(|e| e.path.clone()).collect::<Vec<_>>();
+        assert_eq!(paths(&whole), paths(&split));
+        assert_eq!(split.unlocated, 0);
+        let id = find(&split.tree, &locked).unwrap();
+        assert!(split.tree.node(id).has(flag::UNREADABLE));
     }
 
     #[test]
