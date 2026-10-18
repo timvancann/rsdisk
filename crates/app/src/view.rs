@@ -2,7 +2,9 @@
 //! and turns input into `Browser` calls; drawing lives in `scanning.rs` and `list_view.rs`.
 
 use crate::browser::Browser;
+use crate::cleanup::Dialog;
 use crate::keys::{Action, Keymap};
+use crate::marks::Marks;
 use crate::settings::{ColourMode, Settings, Visual};
 use crate::theme::{self, Theme};
 use crate::visual::{Hover, VisualCache};
@@ -41,6 +43,8 @@ pub struct RsDisk {
     pub(crate) settings: Settings,
     pub(crate) visual_cache: Rc<RefCell<VisualCache>>,
     pub(crate) hover: Option<Hover>,
+    pub(crate) marks: Marks,
+    pub(crate) dialog: Option<Dialog>,
     themes: Vec<Theme>,
     keymap: Keymap,
     focus: FocusHandle,
@@ -94,6 +98,8 @@ impl RsDisk {
             settings,
             visual_cache: Rc::default(),
             hover: None,
+            marks: Marks::default(),
+            dialog: None,
             keymap: Keymap::default(),
             focus,
             located: None,
@@ -137,6 +143,9 @@ impl RsDisk {
             }
             cx.notify();
             return;
+        }
+        if self.poll_trash() {
+            cx.notify();
         }
         if let Some(rx) = &self.located
             && let Ok(found) = rx.try_recv()
@@ -197,6 +206,10 @@ impl RsDisk {
             (Some(c), false) => c.as_str(),
             _ => k.key.as_str(),
         };
+        if self.dialog_key(key) {
+            cx.notify();
+            return;
+        }
         let Some(action) = self.keymap.feed(key, k.modifiers.control) else {
             return;
         };
@@ -238,6 +251,12 @@ impl RsDisk {
             cx.notify();
             return;
         }
+        match action {
+            Action::ToggleMark => self.toggle_mark(),
+            Action::UnmarkAll => self.marks.clear(),
+            Action::Trash => self.open_confirm(),
+            _ => {}
+        }
         let rows = Self::visible_rows(window);
         match &mut self.stage {
             Stage::Scanning { progress, .. } => {
@@ -256,6 +275,7 @@ impl RsDisk {
                     Action::Open => b.open(),
                     Action::Back => b.back(),
                     Action::CycleSort => b.cycle_sort(),
+                    Action::ToggleMark | Action::UnmarkAll | Action::Trash => {}
                     Action::Help => self.help = true,
                     Action::Reveal => {
                         if let Some(s) = b.selected() {

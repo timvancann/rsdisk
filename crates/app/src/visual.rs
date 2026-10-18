@@ -76,6 +76,8 @@ struct Frame {
     centre_label: (SharedString, SharedString),
     selected: Option<usize>,
     hovered: Option<usize>,
+    /// Cells or arcs of marked nodes, outlined in the accent colour.
+    marked: Vec<usize>,
     theme: Theme,
 }
 
@@ -245,6 +247,16 @@ impl RsDisk {
                 (fills, labels, selected, hovered_ix)
             }
         };
+        let nodes: Vec<Option<NodeId>> = match self.settings.visual {
+            Visual::Treemap => cache.cells.iter().map(|c| c.node).collect(),
+            Visual::Sunburst => cache.arcs.iter().map(|a| a.node).collect(),
+        };
+        let marked = nodes
+            .iter()
+            .enumerate()
+            .filter(|(_, n)| n.is_some_and(|id| self.marks.is_marked(id)))
+            .map(|(i, _)| i)
+            .collect();
         let folder = tree.node(b.folder());
         let name = if b.folder() == tree.root() {
             self.root.file_name().map_or_else(
@@ -264,6 +276,7 @@ impl RsDisk {
             centre_label: (name.into(), format::bytes(folder.size).into()),
             selected,
             hovered: hovered_ix,
+            marked,
             theme: theme.clone(),
         }
     }
@@ -591,6 +604,16 @@ fn paint_treemap(cells: &[Cell], f: &Frame, o: Point<Pixels>, window: &mut Windo
             );
         }
     }
+    for &i in &f.marked {
+        window.paint_quad(quad(
+            rect_bounds(&cells[i].rect, o),
+            px(2.),
+            transparent_black(),
+            px(2.5),
+            hsla(t.accent),
+            BorderStyle::Solid,
+        ));
+    }
     for (ix, width) in [(f.hovered, 1.5), (f.selected, 2.5)] {
         if let Some(i) = ix {
             let b = rect_bounds(&cells[i].rect, o);
@@ -691,6 +714,11 @@ fn paint_sunburst(
                 centre.y - px(r * mid.cos() + 7.),
             );
             text(label, at, ink(f.fills[i]), window, cx);
+        }
+    }
+    for &i in &f.marked {
+        if let Some(path) = arc_path(&arcs[i], centre, PathBuilder::stroke(px(2.5))) {
+            window.paint_path(path, hsla(t.accent));
         }
     }
     for (ix, width) in [(f.hovered, 1.5), (f.selected, 2.5)] {

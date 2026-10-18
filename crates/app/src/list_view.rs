@@ -17,6 +17,11 @@ const HELP: &[(&str, &str)] = &[
     ("gg / G", "top / bottom"),
     ("Ctrl-d / Ctrl-u", "half a page down / up"),
     ("s", "sort by size, name, files"),
+    ("Space", "mark / unmark, then down"),
+    ("u", "clear marks"),
+    ("d", "review marked and move to the Trash"),
+    ("v", "treemap / sunburst"),
+    ("a", "colour by kind / age"),
     ("o", "reveal in Finder"),
     ("?", "this help"),
     ("q", "quit"),
@@ -56,6 +61,7 @@ impl RsDisk {
                     )
                     .child(self.render_visual(b, cx)),
             )
+            .children(self.render_marked_pane())
             .when(rows == 0, |d| {
                 d.child(
                     div()
@@ -67,6 +73,7 @@ impl RsDisk {
                 )
             })
             .when(self.help, |d| d.child(self.render_help()))
+            .children(self.render_dialog())
     }
 
     fn render_header(&self, b: &Browser, cx: &mut Context<Self>) -> impl IntoElement {
@@ -155,7 +162,12 @@ impl RsDisk {
                 } else {
                     n.name.to_string()
                 };
-                let marker = marker(n.flags);
+                let marked = self.marks.covered(tree, id);
+                let marker = if marked {
+                    Some("marked")
+                } else {
+                    marker(n.flags)
+                };
                 div()
                     .id(("row", id as usize))
                     .h(px(ROW_HEIGHT))
@@ -168,8 +180,22 @@ impl RsDisk {
                     .on_click(cx.listener(move |view, ev: &ClickEvent, _, cx| {
                         view.click_row(id, ev.click_count() >= 2, cx)
                     }))
-                    .child(div().flex_1().min_w_0().truncate().child(name))
-                    .children(marker.map(|m| div().text_color(rgb(t.dim)).child(m)))
+                    .child(
+                        div()
+                            .flex_1()
+                            .min_w_0()
+                            .truncate()
+                            .when(marked, |d| {
+                                d.text_color(rgb(t.accent))
+                                    .font_weight(FontWeight::SEMIBOLD)
+                            })
+                            .child(name),
+                    )
+                    .children(marker.map(|m| {
+                        div()
+                            .text_color(rgb(if marked { t.accent } else { t.dim }))
+                            .child(m)
+                    }))
                     .child(
                         div()
                             .w(px(BAR_WIDTH))

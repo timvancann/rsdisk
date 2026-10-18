@@ -1,7 +1,7 @@
 //! Moving marked items to the Trash and keeping the tree in step (spec §2.11, §3.11).
 
 use crate::tree::{NodeId, Tree};
-use std::path::Path;
+use std::path::{Path, PathBuf};
 
 /// Moves one file or folder to the Trash.
 pub trait Trasher {
@@ -29,14 +29,36 @@ pub struct TrashOutcome {
 /// Trashes each node's path. Successes leave the tree (sizes shrink upward and folder
 /// summaries are redone once at the end); failures stay and come back with the reason.
 pub fn trash_all(tree: &mut Tree, ids: &[NodeId], trasher: &dyn Trasher) -> TrashOutcome {
+    let results = trash_paths(targets(tree, ids), trasher);
+    apply(tree, results)
+}
+
+/// The paths to trash for `ids`; the root gets no path, so it is refused.
+pub fn targets(tree: &Tree, ids: &[NodeId]) -> Vec<(NodeId, Option<PathBuf>)> {
+    ids.iter()
+        .map(|&id| (id, (id != tree.root()).then(|| tree.path(id))))
+        .collect()
+}
+
+/// Trashes each path. Touches only the filesystem, so it can run off the main thread.
+pub fn trash_paths(
+    targets: Vec<(NodeId, Option<PathBuf>)>,
+    trasher: &dyn Trasher,
+) -> Vec<(NodeId, Result<(), String>)> {
+    targets
+        .into_iter()
+        .map(|(id, path)| match path {
+            Some(p) => (id, trasher.trash(&p)),
+            None => (id, Err("the scan root can't be trashed".into())),
+        })
+        .collect()
+}
+
+/// Removes what was trashed from the tree and redoes the folder summaries once.
+pub fn apply(tree: &mut Tree, results: Vec<(NodeId, Result<(), String>)>) -> TrashOutcome {
     let mut out = TrashOutcome::default();
-    for &id in ids {
-        if id == tree.root() {
-            out.failed
-                .push((id, "the scan root can't be trashed".into()));
-            continue;
-        }
-        match trasher.trash(&tree.path(id)) {
+    for (id, result) in results {
+        match result {
             Ok(()) => {
                 tree.remove(id);
                 out.removed.push(id);
