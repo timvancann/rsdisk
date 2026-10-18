@@ -27,6 +27,7 @@ const HELP: &[(&str, &str)] = &[
     ("v", "treemap / sunburst"),
     ("a", "colour by kind / age"),
     ("o", "reveal in Finder"),
+    ("p", "preview with Quick Look"),
     ("?", "this help"),
     ("q", "quit"),
 ];

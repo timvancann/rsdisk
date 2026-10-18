@@ -187,7 +187,8 @@ Starting set, refined during the GUI plans:
 - `s` cycle sort (size, name, count), `r` rescan the current folder, `c` scan a not-scanned
   cloud folder.
 - `v` switch the visual (treemap, sunburst), `a` switch colour (kind, age).
-- `o` reveal in Finder, `?` help, `q` quit.
+- `o` reveal in Finder, `p` preview the selected item with Quick Look (again closes it),
+  `?` help, `q` quit.
 - Mouse: click selects, double-click opens, clicking a cell in the visual selects that item.
 
 ### 3.10 Search
