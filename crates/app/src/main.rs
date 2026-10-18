@@ -18,7 +18,10 @@ impl Render for Shell {
 
 fn main() {
     let home = std::env::home_dir().expect("no home folder");
-    let root = std::env::args_os().nth(1).map(PathBuf::from).unwrap_or(home);
+    let root = std::env::args_os()
+        .nth(1)
+        .map(PathBuf::from)
+        .unwrap_or(home);
     let root = std::path::absolute(&root).unwrap_or(root);
     // Screenshot launches must not take keyboard focus from whatever Tim is typing in.
     let focus = std::env::var_os("RSDISK_NO_FOCUS").is_none();
