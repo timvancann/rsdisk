@@ -1,2 +1,3 @@
 target/
 *.scan.json
+.playwright-mcp/

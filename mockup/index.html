@@ -1,0 +1,378 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>rsdisk mockup</title>
+<script src="https://cdnjs.cloudflare.com/ajax/libs/d3/7.9.0/d3.min.js" integrity="sha384-CjloA8y00+1SDAUkjs099PVfnY2KmDC2BZnws9kh8D/lX1s46w6EPhpXdqMfjK6i" crossorigin="anonymous"></script>
+<style>
+  :root {
+    --bg: #f6f5f2;
+    --panel: #ffffff;
+    --text: #1d1f23;
+    --dim: #6b6f76;
+    --line: #d9d7d2;
+    --neutral: #c9c6bf;
+    --accent: #1d1f23;
+    color-scheme: light;
+  }
+  @media (prefers-color-scheme: dark) {
+    :root {
+      --bg: #16171a;
+      --panel: #1f2125;
+      --text: #e6e4df;
+      --dim: #8d9097;
+      --line: #33363c;
+      --neutral: #4a4d54;
+      --accent: #e6e4df;
+      color-scheme: dark;
+    }
+  }
+  * { box-sizing: border-box; }
+  body {
+    margin: 0;
+    background: var(--bg);
+    color: var(--text);
+    font: 14px/1.4 ui-sans-serif, -apple-system, "SF Pro Text", system-ui, sans-serif;
+  }
+  header {
+    display: flex;
+    flex-wrap: wrap;
+    align-items: center;
+    gap: 12px 20px;
+    padding: 14px 16px;
+    border-bottom: 1px solid var(--line);
+  }
+  h1 { font-size: 15px; margin: 0; font-weight: 650; }
+  .meta { color: var(--dim); font-variant-numeric: tabular-nums; }
+  .seg { display: inline-flex; border: 1px solid var(--line); border-radius: 6px; overflow: hidden; }
+  .seg button {
+    font: inherit; padding: 4px 10px; border: 0; background: transparent; color: var(--text); cursor: pointer;
+  }
+  .seg button[aria-pressed="true"] { background: var(--accent); color: var(--bg); }
+  label.pick {
+    font: inherit; padding: 4px 10px; border: 1px solid var(--line); border-radius: 6px; cursor: pointer;
+  }
+  label.pick input { display: none; }
+  nav.crumbs { padding: 10px 16px; display: flex; flex-wrap: wrap; gap: 4px; font-family: ui-monospace, "JetBrains Mono", Menlo, monospace; font-size: 13px; }
+  nav.crumbs button { font: inherit; border: 0; background: none; color: var(--dim); cursor: pointer; padding: 0; }
+  nav.crumbs button:last-child { color: var(--text); font-weight: 600; cursor: default; }
+  nav.crumbs span { color: var(--dim); }
+  main {
+    display: grid;
+    grid-template-columns: 1fr;
+    gap: 16px;
+    padding: 0 16px 24px;
+  }
+  @media (min-width: 1400px) {
+    main { grid-template-columns: 1.3fr 1fr 1fr; }
+  }
+  section { background: var(--panel); border: 1px solid var(--line); border-radius: 8px; padding: 12px; min-width: 0; }
+  section h2 { font-size: 13px; margin: 0 0 8px; font-weight: 600; color: var(--dim); }
+  .view { width: 100%; height: 560px; }
+  .view svg { display: block; }
+  .legend { display: flex; flex-wrap: wrap; gap: 6px 14px; padding: 0 16px 12px; color: var(--dim); font-size: 12px; }
+  .legend i { display: inline-block; width: 10px; height: 10px; border-radius: 2px; margin-right: 5px; vertical-align: -1px; }
+  .empty { display: grid; place-items: center; min-height: 60vh; color: var(--dim); text-align: center; padding: 16px; }
+  .drop { outline: 2px dashed var(--dim); outline-offset: -8px; }
+  #tip {
+    position: fixed; pointer-events: none; z-index: 10; display: none;
+    background: var(--panel); border: 1px solid var(--line); border-radius: 6px;
+    padding: 6px 9px; font-size: 12px; max-width: 420px; box-shadow: 0 4px 16px rgb(0 0 0 / 0.15);
+  }
+  #tip b { font-family: ui-monospace, "JetBrains Mono", Menlo, monospace; font-weight: 600; word-break: break-all; }
+  .cell { cursor: pointer; }
+  .cell.hover { stroke: var(--text); stroke-width: 2px; }
+  text { pointer-events: none; font-size: 11px; }
+</style>
+</head>
+<body>
+<header>
+  <h1>rsdisk mockup</h1>
+  <label class="pick">Open scan<input id="file" type="file" accept=".json,application/json"></label>
+  <div class="seg" role="group" aria-label="Colour by">
+    <button data-mode="kind" aria-pressed="true">Kind</button>
+    <button data-mode="age" aria-pressed="false">Age</button>
+  </div>
+  <span class="meta" id="meta"></span>
+</header>
+<div id="app">
+  <div class="empty" id="empty">
+    <div>
+      Open or drop a <code>.scan.json</code> made with<br>
+      <code>rsdisk-core scan ~ --json home.scan.json</code>
+    </div>
+  </div>
+</div>
+<div id="tip"></div>
+
+<script>
+const KIND_COLOURS = {
+  video: "#e06c75", audio: "#c678dd", image: "#e5c07b", archive: "#d19a66",
+  document: "#61afef", code: "#98c379", app: "#56b6c2", other: "#9aa0a6",
+};
+const DAY = 86400;
+// Sunburst and icicle show this many levels below (and including) the focused folder.
+const LEVELS = 6;
+let data = null, root = null, focus = null, mode = "kind", hovered = null;
+const now = Date.now() / 1000;
+
+function bytes(n) {
+  if (n < 1000) return `${n} B`;
+  const units = ["KB", "MB", "GB", "TB", "PB"];
+  let v = n / 1000, u = 0;
+  while (v >= 999.95 && u < units.length - 1) { v /= 1000; u++; }
+  return `${v.toFixed(1)} ${units[u]}`;
+}
+function age(mtime) {
+  if (!mtime) return "unknown";
+  const d = (now - mtime) / DAY;
+  if (d < 1) return "today";
+  if (d < 60) return `${Math.round(d)} days ago`;
+  if (d < 730) return `${Math.round(d / 30)} months ago`;
+  return `${(d / 365).toFixed(1)} years ago`;
+}
+// Recent is a calm teal, old is red: big and untouched is what should stand out.
+const ageScale = d3.scaleSequentialLog(d3.piecewise(d3.interpolateHcl, ["#4fa3a5", "#d8c27a", "#d9534f"]))
+  .domain([1, 5 * 365]).clamp(true);
+
+function load(json) {
+  data = json;
+  root = d3.hierarchy(json, d => d.children)
+    .sum(d => (d.children && d.children.length ? 0 : d.size))
+    .sort((a, b) => b.value - a.value);
+  let i = 0;
+  root.eachAfter(n => {
+    n.id = i++;
+    // Folders take the kind holding most of their bytes, and a size-weighted mean age.
+    const kinds = {}; let weighted = 0, dated = 0;
+    if (!n.children) {
+      if (n.data.kind) kinds[n.data.kind] = n.value;
+      if (n.data.mtime && !n.data.other) { weighted = n.data.mtime * n.value; dated = n.value; }
+    } else {
+      for (const c of n.children) {
+        for (const [k, v] of Object.entries(c.kinds)) kinds[k] = (kinds[k] || 0) + v;
+        weighted += c.weighted; dated += c.dated;
+      }
+    }
+    n.kinds = kinds; n.weighted = weighted; n.dated = dated;
+    const top = Object.entries(kinds).sort((a, b) => b[1] - a[1])[0];
+    n.kind = top ? top[0] : null;
+    n.meanAge = dated ? weighted / dated : 0;
+  });
+  focus = root;
+  document.getElementById("meta").textContent =
+    `${json.path}, ${bytes(json.size)}, ${json.files.toLocaleString("en-US")} files, scanned in ${(json.elapsed_ms / 1000).toFixed(1)} s` +
+    (json.errors ? `, ${json.errors} unreadable` : "");
+  render();
+}
+
+function colour(n) {
+  if (n.data.other) return "var(--neutral)";
+  if (mode === "kind") return n.kind ? KIND_COLOURS[n.kind] : "var(--neutral)";
+  return n.meanAge ? ageScale(Math.max(1, (now - n.meanAge) / DAY)) : "var(--neutral)";
+}
+function escape(s) {
+  return s.replace(/[&<>"]/g, c => ({ "&": "&amp;", "<": "&lt;", ">": "&gt;", '"': "&quot;" }[c]));
+}
+function pathOf(n) { return n.ancestors().reverse().map(a => a.data.name).join("/").replace(/^\/\//, "/"); }
+function zoomTo(n) {
+  if (!n) return;
+  if (!n.children) n = n.parent;
+  if (n && n !== focus) { focus = n; render(); }
+}
+
+function app() {
+  const el = document.getElementById("app");
+  el.innerHTML = `
+    <nav class="crumbs" id="crumbs"></nav>
+    <div class="legend" id="legend"></div>
+    <main>
+      <section><h2>Treemap</h2><div class="view" id="treemap"></div></section>
+      <section><h2>Sunburst</h2><div class="view" id="sunburst"></div></section>
+      <section><h2>Icicle</h2><div class="view" id="icicle"></div></section>
+    </main>`;
+}
+
+function render() {
+  if (!document.getElementById("treemap")) app();
+  renderCrumbs(); renderLegend();
+  treemap(); sunburst(); icicle();
+}
+
+function renderCrumbs() {
+  const nav = d3.select("#crumbs").html("");
+  const chain = focus.ancestors().reverse();
+  chain.forEach((n, i) => {
+    if (i) nav.append("span").text("/");
+    nav.append("button").text(i ? n.data.name : data.path)
+      .on("click", () => { if (n !== focus) { focus = n; render(); } });
+  });
+}
+
+function renderLegend() {
+  const l = d3.select("#legend").html("");
+  if (mode === "kind") {
+    for (const [k, c] of Object.entries(KIND_COLOURS)) l.append("span").html(`<i style="background:${c}"></i>${k}`);
+  } else {
+    for (const [label, days] of [["today", 1], ["1 month", 30], ["6 months", 182], ["1 year", 365], ["5 years+", 1825]])
+      l.append("span").html(`<i style="background:${ageScale(days)}"></i>${label}`);
+  }
+  l.append("span").html(`<i style="background:var(--neutral)"></i>(other), the rest of a folder`);
+}
+
+// Shared hover: the same node lights up in every view.
+function bind(sel) {
+  sel.classed("cell", true)
+    .attr("data-id", d => d.id)
+    .on("click", (e, d) => { e.stopPropagation(); zoomTo(d === focus ? focus.parent : d); })
+    .on("mousemove", (e, d) => {
+      const tip = document.getElementById("tip");
+      tip.style.display = "block";
+      tip.style.left = Math.min(e.clientX + 14, innerWidth - 430) + "px";
+      tip.style.top = (e.clientY + 14) + "px";
+      const kind = d.data.other ? "the rest of this folder" : (d.children ? `mostly ${d.kind || "unknown"}` : d.data.kind);
+      tip.innerHTML = `<b>${escape(pathOf(d))}</b><br>${bytes(d.value)}, ${d.data.files.toLocaleString("en-US")} files, ${kind}, ${age(d.children ? d.meanAge : d.data.mtime)}`;
+      if (hovered !== d.id) {
+        d3.selectAll(".cell.hover").classed("hover", false);
+        d3.selectAll(`.cell[data-id="${d.id}"]`).classed("hover", true);
+        hovered = d.id;
+      }
+    })
+    .on("mouseleave", () => {
+      document.getElementById("tip").style.display = "none";
+      d3.selectAll(".cell.hover").classed("hover", false);
+      hovered = null;
+    });
+}
+
+function size(id) {
+  const el = document.getElementById(id);
+  return [el.clientWidth, el.clientHeight];
+}
+function textFill(c) {
+  if (c.startsWith("var")) return "var(--text)";
+  const { r, g, b } = d3.rgb(c);
+  return (0.299 * r + 0.587 * g + 0.114 * b) > 150 ? "#111" : "#fff";
+}
+// A copy of the focused subtree, so each layout can position it without touching the others.
+function sub() { return focus.copy().sum(d => (d.children && d.children.length ? 0 : d.size)).sort((a, b) => b.value - a.value); }
+// Map copied nodes back to the originals for colour, ids and zooming.
+function originals(copyRoot) {
+  const orig = focus.descendants(), copies = copyRoot.descendants();
+  copies.forEach((c, i) => { c.o = orig[i]; });
+  return copies;
+}
+
+function treemap() {
+  const [w, h] = size("treemap");
+  const r = sub();
+  // Only the top two folder levels get a header strip; deeper folders are drawn as plain
+  // nesting, or the labels pile up.
+  const headed = n => n.children && n.depth > 0 && n.depth <= 2;
+  // paddingOuter sets all four sides, so it has to come before paddingTop.
+  d3.treemap().size([w, h]).tile(d3.treemapSquarify)
+    .paddingInner(1).paddingOuter(n => n.depth > 2 ? 0 : 2)
+    .paddingTop(n => headed(n) ? 16 : (n.children && n.depth > 0 ? 1 : 0))
+    .round(true)(r);
+  const nodes = originals(r).filter(n => n.depth > 0);
+  const svg = d3.select("#treemap").html("").append("svg").attr("width", w).attr("height", h);
+  const g = svg.selectAll("g").data(nodes).join("g").attr("transform", d => `translate(${d.x0},${d.y0})`);
+  bind(g.append("rect")
+    .attr("width", d => Math.max(0, d.x1 - d.x0))
+    .attr("height", d => Math.max(0, d.y1 - d.y0))
+    .datum(d => d.o)
+    .attr("fill", d => d.children ? "transparent" : colour(d))
+    .attr("stroke", d => d.children ? "var(--line)" : "none"));
+  g.filter(d => (d.x1 - d.x0) > 40 && (d.children ? headed(d) : (d.y1 - d.y0) > 14 && d.depth <= 3))
+    .append("text").attr("x", 4).attr("y", 12)
+    .attr("fill", d => d.children ? "var(--dim)" : textFill(colour(d.o)))
+    .text(d => label(d.o, d.x1 - d.x0 - 8));
+}
+
+function label(n, room) {
+  const text = `${n.data.name} ${bytes(n.value)}`;
+  const max = Math.floor(room / 6.2);
+  return text.length <= max ? text : (max > 3 ? text.slice(0, max - 1) + "…" : "");
+}
+
+function sunburst() {
+  const [w] = size("sunburst");
+  const h = document.getElementById("sunburst").clientHeight;
+  const d = Math.min(w, h), radius = d / 2;
+  const r = sub();
+  const depth = Math.min(r.height + 1, LEVELS);
+  d3.partition().size([2 * Math.PI, r.height + 1])(r);
+  const ring = radius / depth;
+  const nodes = originals(r);
+  const arc = d3.arc().startAngle(n => n.x0).endAngle(n => n.x1)
+    .padAngle(n => Math.min((n.x1 - n.x0) / 2, 0.004)).padRadius(radius / 2)
+    .innerRadius(n => n.y0 * ring).outerRadius(n => Math.max(n.y0 * ring, n.y1 * ring - 1));
+  const svg = d3.select("#sunburst").html("").append("svg").attr("width", w).attr("height", d)
+    .append("g").attr("transform", `translate(${w / 2},${radius})`);
+  const centre = nodes[0];
+  bind(svg.append("circle").datum(centre.o).attr("r", ring - 1).attr("fill", "var(--panel)").attr("stroke", "var(--line)"));
+  svg.append("text").attr("text-anchor", "middle").attr("dy", "-0.2em").attr("fill", "var(--text)").style("font-weight", 600)
+    .text(focus.depth ? focus.data.name : "~");
+  svg.append("text").attr("text-anchor", "middle").attr("dy", "1.1em").attr("fill", "var(--dim)").text(bytes(focus.value));
+  const rest = nodes.filter(n => n.depth > 0 && n.depth < LEVELS);
+  bind(svg.selectAll("path.arc").data(rest).join("path").attr("class", "arc").attr("d", arc).datum(n => n.o)
+    .attr("fill", n => colour(n)));
+  svg.selectAll("text.lbl").data(rest.filter(n => (n.x1 - n.x0) * (n.y0 + 0.5) * ring > 30 && ring > 30))
+    .join("text").attr("class", "lbl").attr("text-anchor", "middle").attr("dy", "0.35em")
+    .attr("fill", n => textFill(colour(n.o)))
+    .attr("transform", n => {
+      const a = (n.x0 + n.x1) / 2 * 180 / Math.PI, y = (n.y0 + n.y1) / 2 * ring;
+      return `rotate(${a - 90}) translate(${y},0) rotate(${a < 180 ? 0 : 180})`;
+    })
+    .text(n => { const t = n.o.data.name; const max = Math.floor((ring - 6) / 6.2); return t.length <= max ? t : t.slice(0, Math.max(0, max - 1)) + "…"; });
+}
+
+function icicle() {
+  const [w, h] = size("icicle");
+  const r = sub();
+  const cols = Math.min(r.height + 1, LEVELS);
+  d3.partition().size([h, r.height + 1])(r);
+  const colW = w / cols;
+  const nodes = originals(r).filter(n => n.depth < LEVELS);
+  const svg = d3.select("#icicle").html("").append("svg").attr("width", w).attr("height", h);
+  const g = svg.selectAll("g").data(nodes).join("g").attr("transform", n => `translate(${n.y0 * colW},${n.x0})`);
+  bind(g.append("rect")
+    .attr("width", colW - 1)
+    .attr("height", n => Math.max(0, n.x1 - n.x0 - 1))
+    .datum(n => n.o)
+    .attr("fill", o => o === focus ? "var(--panel)" : colour(o))
+    .attr("stroke", o => o === focus ? "var(--line)" : "none"));
+  g.filter(n => n.x1 - n.x0 > 14).append("text").attr("x", 4).attr("y", 12)
+    .attr("fill", (n, i) => n.depth === 0 ? "var(--text)" : textFill(colour(n.o)))
+    .text(n => label(n.o, colW - 8));
+}
+
+document.querySelectorAll(".seg button").forEach(b => b.addEventListener("click", () => {
+  mode = b.dataset.mode;
+  document.querySelectorAll(".seg button").forEach(x => x.setAttribute("aria-pressed", x === b));
+  if (root) render();
+}));
+
+function readFile(file) {
+  if (!file) return;
+  file.text().then(t => load(JSON.parse(t))).catch(e => {
+    document.getElementById("meta").textContent = `Couldn't read ${file.name}: ${e.message}`;
+  });
+}
+document.getElementById("file").addEventListener("change", e => readFile(e.target.files[0]));
+addEventListener("dragover", e => { e.preventDefault(); document.body.classList.add("drop"); });
+addEventListener("dragleave", () => document.body.classList.remove("drop"));
+addEventListener("drop", e => { e.preventDefault(); document.body.classList.remove("drop"); readFile(e.dataTransfer.files[0]); });
+addEventListener("keydown", e => {
+  if ((e.key === "Backspace" || e.key === "h" || e.key === "Escape") && focus && focus.parent) { focus = focus.parent; render(); }
+});
+let resizeTimer;
+addEventListener("resize", () => { clearTimeout(resizeTimer); resizeTimer = setTimeout(() => root && render(), 150); });
+
+// Served over http with ?data=<file>, load it straight away (handy for screenshots).
+const preset = new URLSearchParams(location.search).get("data");
+if (preset) fetch(preset).then(r => r.json()).then(load);
+</script>
+</body>
+</html>
