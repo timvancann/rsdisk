@@ -11,12 +11,12 @@ use crate::layout::sunburst::{self, Arc};
 use crate::layout::treemap::{self, Cell, HEADER};
 use crate::scanning::count;
 use crate::settings::{ColourMode, Visual};
-use crate::theme::Theme;
+use crate::theme::{MONO, Theme};
 use crate::view::RsDisk;
 use gpui_kit::{prelude::*, *};
 use rsdisk_core::format;
 use rsdisk_core::kind::Kind;
-use rsdisk_core::tree::{NodeId, Tree};
+use rsdisk_core::tree::{NodeId, Tree, flag};
 use std::cell::RefCell;
 use std::collections::HashSet;
 use std::f32::consts::TAU;
@@ -76,12 +76,12 @@ struct Frame {
     centre_label: (SharedString, SharedString),
     selected: Option<usize>,
     hovered: Option<usize>,
-    /// Cells or arcs of marked nodes, outlined in the accent colour.
+    /// Cells or arcs of marked nodes, outlined dashed.
     marked: Vec<usize>,
     theme: Theme,
 }
 
-fn now() -> u64 {
+pub(crate) fn now() -> u64 {
     SystemTime::now()
         .duration_since(UNIX_EPOCH)
         .map_or(0, |d| d.as_secs())
@@ -91,32 +91,49 @@ fn hsla(c: u32) -> Hsla {
     rgb(c).into()
 }
 
-/// Dark text on light fills, light text on dark ones.
-fn ink(fill: u32) -> u32 {
-    let (r, g, b) = ((fill >> 16) & 0xff, (fill >> 8) & 0xff, fill & 0xff);
-    if 299 * r + 587 * g + 114 * b > 150_000 {
-        0x111111
-    } else {
-        0xffffff
-    }
-}
+/// Roughly how wide one character is at 11 px type.
+const CHAR_W: f32 = 6.4;
 
-/// `text` cut to roughly fit `width` px at 11 px type.
-fn fit(text: String, width: f32) -> Option<SharedString> {
-    let max = (width / 6.4) as usize;
-    if max < 4 {
+/// `text` cut to roughly fit `width` px at 11 px type; `None` below `min` characters.
+fn fit(text: &str, width: f32, min: usize) -> Option<String> {
+    let max = (width / CHAR_W) as usize;
+    let len = text.chars().count();
+    if len <= max {
+        return Some(text.to_string());
+    }
+    if max < min.max(2) {
         return None;
     }
-    if text.chars().count() <= max {
-        return Some(text.into());
-    }
     let cut: String = text.chars().take(max - 1).collect();
-    Some(format!("{cut}\u{2026}").into())
+    Some(format!("{cut}\u{2026}"))
 }
 
-fn label(tree: &Tree, id: NodeId) -> String {
-    let n = tree.node(id);
-    format!("{} {}", n.name, format::bytes(n.size))
+/// `name size`, cutting the name (to no fewer than `min` characters) rather than the size;
+/// just the size when the name has no room, nothing when even that doesn't fit.
+fn label(name: &str, size: u64, width: f32, min: usize) -> Option<SharedString> {
+    let size = format::bytes(size);
+    let size_w = (size.chars().count() + 1) as f32 * CHAR_W;
+    match fit(name, width - size_w, min) {
+        Some(name) => Some(format!("{name} {size}").into()),
+        None => fit(&size, width, usize::MAX).map(Into::into),
+    }
+}
+
+/// The size of `parent`'s merged small items: what its drawn children leave over.
+fn rest_size<T>(
+    tree: &Tree,
+    items: &[T],
+    parent: NodeId,
+    node: impl Fn(&T) -> Option<NodeId>,
+    parent_of: impl Fn(&T) -> NodeId,
+) -> u64 {
+    let shown: u64 = items
+        .iter()
+        .filter(|i| parent_of(i) == parent)
+        .filter_map(&node)
+        .map(|id| tree.node(id).size)
+        .sum();
+    tree.node(parent).size.saturating_sub(shown)
 }
 
 /// The child of `folder` that `id` lies under (or `id` itself).
@@ -200,14 +217,23 @@ impl RsDisk {
                     .cells
                     .iter()
                     .map(|c| {
-                        let id = c.node?;
+                        let Some(id) = c.node else {
+                            // A folder's merged small items, labelled when there's room.
+                            let size =
+                                rest_size(tree, &cache.cells, c.parent, |c| c.node, |c| c.parent);
+                            return (c.rect.w > 60. && c.rect.h > 30.)
+                                .then(|| label("small items", size, c.rect.w - 8., usize::MAX))
+                                .flatten();
+                        };
                         let framed = cache.framed.contains(&id);
                         let fits = if framed {
                             c.header
                         } else {
                             c.depth <= 3 && c.rect.h > 16. && c.rect.w > 40.
                         };
-                        fits.then(|| fit(label(tree, id), c.rect.w - 8.)).flatten()
+                        let n = tree.node(id);
+                        fits.then(|| label(&n.name, n.size, c.rect.w - 8., 4))
+                            .flatten()
                     })
                     .collect();
                 let selected = cache
@@ -230,9 +256,12 @@ impl RsDisk {
                         let id = a.node?;
                         let mid = (a.inner + a.outer) / 2.;
                         let arc_len = (a.end - a.start) * mid;
+                        // Whole names or at least 8 characters; stubs say nothing, and the
+                        // tooltip has the rest.
                         (arc_len > 60. && cache.ring > 30.)
-                            .then(|| fit(tree.node(id).name.to_string(), cache.ring - 6.))
+                            .then(|| fit(&tree.node(id).name, cache.ring - 6., 8))
                             .flatten()
+                            .map(SharedString::from)
                     })
                     .collect();
                 let selected = cache
@@ -273,7 +302,17 @@ impl RsDisk {
             fills,
             framed,
             labels,
-            centre_label: (name.into(), format::bytes(folder.size).into()),
+            centre_label: (name.into(), {
+                let result = b.result();
+                let at_least = if b.folder() == tree.root()
+                    && (result.error_count() > 0 || result.cancelled)
+                {
+                    "at least "
+                } else {
+                    ""
+                };
+                format!("{at_least}{}", format::bytes(folder.size)).into()
+            }),
             selected,
             hovered: hovered_ix,
             marked,
@@ -340,6 +379,18 @@ impl RsDisk {
 
     pub fn render_visual(&self, b: &Browser, cx: &mut Context<Self>) -> impl IntoElement {
         let t = &self.theme;
+        if b.rows().is_empty() {
+            return div()
+                .flex_1()
+                .h_full()
+                .flex()
+                .items_center()
+                .justify_center()
+                .border_l_1()
+                .border_color(rgb(t.faint))
+                .text_color(rgb(t.dim))
+                .child("Nothing here");
+        }
         let frame = self.frame(b, cx.entity_id());
         let tooltip = self.hover.and_then(|h| self.tooltip(b, h));
         div()
@@ -389,47 +440,21 @@ impl RsDisk {
         let (title, detail) = match hover.target {
             Target::Centre => return None,
             Target::Rest(parent) => {
-                let shown: u64 = match self.settings.visual {
-                    Visual::Treemap => self
-                        .visual_cache
-                        .borrow()
-                        .cells
-                        .iter()
-                        .filter(|c| c.parent == parent && c.node.is_some())
-                        .map(|c| tree.node(c.node.unwrap()).size)
-                        .sum(),
-                    Visual::Sunburst => self
-                        .visual_cache
-                        .borrow()
-                        .arcs
-                        .iter()
-                        .filter(|a| a.parent == parent && a.node.is_some())
-                        .map(|a| tree.node(a.node.unwrap()).size)
-                        .sum(),
+                let cache = self.visual_cache.borrow();
+                let rest = match self.settings.visual {
+                    Visual::Treemap => {
+                        rest_size(tree, &cache.cells, parent, |c| c.node, |c| c.parent)
+                    }
+                    Visual::Sunburst => {
+                        rest_size(tree, &cache.arcs, parent, |a| a.node, |a| a.parent)
+                    }
                 };
-                let rest = tree.node(parent).size.saturating_sub(shown);
                 (
-                    format!("{}/ (other)", self.relative(tree, parent)),
-                    format!("{}, many small items", format::bytes(rest)),
+                    format!("{}/ (small items)", self.relative(tree, parent)),
+                    format!("{}, too small to draw one by one", format::bytes(rest)),
                 )
             }
-            Target::Node(id) => {
-                let n = tree.node(id);
-                let kind = if n.is_dir() {
-                    format!("mostly {}", n.kind.label())
-                } else {
-                    n.kind.label().to_string()
-                };
-                let age = age_text(n.mtime as u64);
-                (
-                    self.relative(tree, id),
-                    format!(
-                        "{}, {} files, {kind}, {age}",
-                        format::bytes(n.size),
-                        count(n.files as u64)
-                    ),
-                )
-            }
+            Target::Node(id) => self.describe(tree, id),
         };
         // Deferred, so it paints above the legend and the rest of the window; in the lower
         // half of the pane it opens upwards, away from the window's bottom edge.
@@ -448,7 +473,7 @@ impl RsDisk {
             .border_1()
             .border_color(rgb(t.faint))
             .text_size(px(12.))
-            .child(div().font_family("Menlo").child(title))
+            .child(div().font_family(MONO).child(title))
             .child(div().text_color(rgb(t.dim)).child(detail));
         Some(
             deferred(
@@ -461,6 +486,32 @@ impl RsDisk {
             )
             .with_priority(1),
         )
+    }
+
+    /// An item's path and a line about it: size, files, kind, age. The tooltip and the line
+    /// under the list both show it.
+    pub(crate) fn describe(&self, tree: &Tree, id: NodeId) -> (String, String) {
+        let n = tree.node(id);
+        let mut title = self.relative(tree, id);
+        if n.is_dir() {
+            title.push('/');
+        }
+        let size = if n.has(flag::UNREADABLE | flag::NOT_SCANNED | flag::OTHER_VOLUME) {
+            "size unknown".to_string()
+        } else {
+            format::bytes(n.size)
+        };
+        let detail = if n.is_dir() {
+            format!(
+                "{size}, {} files, mostly {}, {}",
+                count(n.files as u64),
+                n.kind.label(),
+                age_text(n.mtime as u64)
+            )
+        } else {
+            format!("{size}, {}, {}", n.kind.label(), age_text(n.mtime as u64))
+        };
+        (title, detail)
     }
 
     /// A path relative to the scan root, for tooltips.
@@ -482,15 +533,7 @@ impl RsDisk {
                 .child(div().size(px(9.)).rounded_sm().bg(rgb(colour)))
                 .child(text)
         };
-        let mut row = div()
-            .flex()
-            .flex_wrap()
-            .gap_x_3()
-            .gap_y_1()
-            .px_3()
-            .pb_2()
-            .text_size(px(11.))
-            .text_color(rgb(t.dim));
+        let mut row = div().flex().flex_wrap().gap_x_3().gap_y_1();
         match self.settings.colour {
             ColourMode::Kind => {
                 for kind in Kind::ALL {
@@ -501,14 +544,29 @@ impl RsDisk {
                 for (text, days) in AGE_LEGEND {
                     row = row.child(swatch(colour::age(days), text.into()));
                 }
+                row = row.child(swatch(t.dim, "age unknown".into()));
             }
         }
         let visual = match self.settings.visual {
             Visual::Treemap => "treemap",
             Visual::Sunburst => "sunburst",
         };
-        row.child(swatch(t.faint, "(other)".into()))
-            .child(div().child(format!("v: {visual}, a: colour")))
+        // The keys get their own slot on the right, so they don't move as the swatches wrap.
+        div()
+            .flex()
+            .items_start()
+            .justify_between()
+            .gap_3()
+            .px_3()
+            .pb_2()
+            .text_size(px(11.))
+            .text_color(rgb(t.dim))
+            .child(row.child(swatch(t.small_items(), "small items".into())))
+            .child(
+                div()
+                    .flex_shrink_0()
+                    .child(format!("v: {visual}, a: colour, ?: keys")),
+            )
     }
 }
 
@@ -593,7 +651,7 @@ fn paint_treemap(cells: &[Cell], f: &Frame, o: Point<Pixels>, window: &mut Windo
             ));
         }
         if let Some(label) = &f.labels[i] {
-            let ink = if framed { t.dim } else { ink(f.fills[i]) };
+            let ink = if framed { t.dim } else { t.ink(f.fills[i]) };
             let y = if c.header { (HEADER - 14.) / 2. } else { 3. };
             text(
                 label,
@@ -604,14 +662,16 @@ fn paint_treemap(cells: &[Cell], f: &Frame, o: Point<Pixels>, window: &mut Windo
             );
         }
     }
+    // Marks are dashed in the text colour, so no fill colour can hide them and they never
+    // read as the selection (solid).
     for &i in &f.marked {
         window.paint_quad(quad(
             rect_bounds(&cells[i].rect, o),
             px(2.),
             transparent_black(),
-            px(2.5),
-            hsla(t.accent),
-            BorderStyle::Solid,
+            px(2.),
+            hsla(t.text),
+            BorderStyle::Dashed,
         ));
     }
     for (ix, width) in [(f.hovered, 1.5), (f.selected, 2.5)] {
@@ -685,8 +745,8 @@ fn paint_sunburst(
         BorderStyle::Solid,
     ));
     let (name, total) = &f.centre_label;
-    if let Some(name) = fit(name.to_string(), 2. * ring - 16.) {
-        let w = name.chars().count() as f32 * 6.4;
+    if let Some(name) = fit(name, 2. * ring - 16., 4).map(SharedString::from) {
+        let w = name.chars().count() as f32 * CHAR_W;
         text(
             &name,
             point(centre.x - px(w / 2.), centre.y - px(15.)),
@@ -713,12 +773,13 @@ fn paint_sunburst(
                 centre.x + px(r * mid.sin() - w / 2.),
                 centre.y - px(r * mid.cos() + 7.),
             );
-            text(label, at, ink(f.fills[i]), window, cx);
+            text(label, at, t.ink(f.fills[i]), window, cx);
         }
     }
     for &i in &f.marked {
-        if let Some(path) = arc_path(&arcs[i], centre, PathBuilder::stroke(px(2.5))) {
-            window.paint_path(path, hsla(t.accent));
+        let dashed = PathBuilder::stroke(px(2.)).dash_array(&[px(5.), px(4.)]);
+        if let Some(path) = arc_path(&arcs[i], centre, dashed) {
+            window.paint_path(path, hsla(t.text));
         }
     }
     for (ix, width) in [(f.hovered, 1.5), (f.selected, 2.5)] {

@@ -172,6 +172,19 @@ pub fn follow(path: &Path) {
     });
 }
 
+/// Esc: closes the panel if it is open. Returns whether it was.
+pub fn close() -> bool {
+    let open = is_open();
+    if open {
+        DispatchQueue::main().exec_async(|| {
+            if let Some(panel) = MainThreadMarker::new().and_then(open_panel) {
+                panel.orderOut(None);
+            }
+        });
+    }
+    open
+}
+
 /// Whether the panel is showing, so callers can skip work when it isn't.
 pub fn is_open() -> bool {
     MainThreadMarker::new().is_some_and(|mtm| open_panel(mtm).is_some())

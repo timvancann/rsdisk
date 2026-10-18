@@ -21,6 +21,8 @@ pub struct Theme {
     /// Borders and separators.
     pub faint: u32,
     pub accent: u32,
+    /// Warnings and refusals (Full Disk Access, notes). Never used for data.
+    pub warning: u32,
     pub error: u32,
     /// One colour per file kind, in the order of `Kind::ALL`.
     pub kinds: [u32; 8],
@@ -30,6 +32,31 @@ impl Theme {
     pub fn kind(&self, kind: Kind) -> u32 {
         self.kinds[kind as usize]
     }
+
+    /// A folder's merged small items: a neutral between `dim` and `surface`, apart from the
+    /// "other" kind (`dim`), unknown age (`dim`) and folder frames (`surface`).
+    pub fn small_items(&self) -> u32 {
+        blend(self.dim, self.surface, 0.45)
+    }
+
+    /// Text on a fill: whichever of the theme's text and background colours is darker on
+    /// light fills, lighter on dark ones.
+    pub fn ink(&self, fill: u32) -> u32 {
+        let (dark, light) = if self.dark {
+            (self.bg, self.text)
+        } else {
+            (self.text, self.bg)
+        };
+        if luma(fill) > 150_000 { dark } else { light }
+    }
+}
+
+/// The rsdisk monospace face, for paths and numbers.
+pub const MONO: &str = "Menlo";
+
+fn luma(c: u32) -> u32 {
+    let (r, g, b) = ((c >> 16) & 0xff, (c >> 8) & 0xff, c & 0xff);
+    299 * r + 587 * g + 114 * b
 }
 
 pub const DARK_NAME: &str = "rsdisk Dark";
@@ -51,6 +78,7 @@ pub fn builtin_dark() -> Theme {
         dim: 0x8d9097,
         faint: 0x33363c,
         accent: 0xe5c07b,
+        warning: 0xf0a868,
         error: 0xe06c75,
         kinds: FALLBACK_KINDS,
     }
@@ -66,7 +94,9 @@ pub fn builtin_light() -> Theme {
         text: 0x1d1f23,
         dim: 0x6b6f76,
         faint: 0xd9d7d2,
-        accent: 0xb07d1a,
+        // About 5:1 on bg, enough for body text (the earlier #b07d1a was 3.3:1).
+        accent: 0x8a5f0f,
+        warning: 0x8f4f12,
         error: 0xc4453f,
         kinds: FALLBACK_KINDS,
     }
@@ -147,6 +177,7 @@ pub fn from_zed(theme: &Value) -> Option<Theme> {
         dim,
         faint: pick(&["border.variant", "border"], fallback.faint),
         accent: pick(&["text.accent"], fallback.accent),
+        warning: pick(&["warning"], fallback.warning),
         error: pick(&["error"], fallback.error),
         kinds: resolved,
     })

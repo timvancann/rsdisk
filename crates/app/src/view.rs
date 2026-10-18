@@ -16,7 +16,7 @@ use rsdisk_core::scan::{
     Progress, ScanError, ScanOptions, ScanResult, apply_unreadable, probe_unreadable, scan,
     unreadable_candidates,
 };
-use rsdisk_core::tree::NodeId;
+use rsdisk_core::tree::{NodeId, flag};
 use std::cell::RefCell;
 use std::path::{Path, PathBuf};
 use std::rc::Rc;
@@ -52,12 +52,23 @@ pub struct RsDisk {
     /// The last search's results and where `n`/`N` are in them.
     pub(crate) last_found: (Vec<NodeId>, usize),
     pub(crate) rescan: Option<Rescan>,
+    /// A one-line answer to the last key, such as why a mark was refused; the next key
+    /// clears it.
+    pub(crate) note: Option<String>,
     themes: Vec<Theme>,
     keymap: Keymap,
     focus: FocusHandle,
     /// Unreadable folders found after the scan, while that search runs (spec §3.2).
     located: Option<Receiver<Vec<(NodeId, ScanError)>>>,
     _appearance: Subscription,
+}
+
+/// Who macOS asks permissions of: RSdisk itself when it runs from its app bundle, else the
+/// terminal it was started from.
+pub fn grantee() -> &'static str {
+    let bundled =
+        std::env::current_exe().is_ok_and(|p| p.to_string_lossy().contains(".app/Contents/MacOS/"));
+    if bundled { "RSdisk" } else { "your terminal" }
 }
 
 fn is_dark(window: &Window) -> bool {
@@ -110,6 +121,7 @@ impl RsDisk {
             find: None,
             last_found: (Vec::new(), 0),
             rescan: None,
+            note: None,
             keymap: Keymap::default(),
             focus,
             located: None,
@@ -165,6 +177,7 @@ impl RsDisk {
                 apply_unreadable(b.result_mut(), found);
                 b.refresh();
             }
+            self.reguard();
             cx.notify();
         }
     }
@@ -179,6 +192,15 @@ impl RsDisk {
             self.located = Some(rx);
         }
         self.stage = Stage::Browsing(Browser::new(result));
+        self.reguard();
+    }
+
+    /// Refreshes what can't be marked (`Marks::guard`) after the tree changed.
+    pub(crate) fn reguard(&mut self) {
+        if let Stage::Browsing(b) = &self.stage {
+            let cloud = ScanOptions::for_home(&self.home).skip;
+            self.marks.guard(b.tree(), &cloud);
+        }
     }
 
     pub fn browser(&self) -> Option<&Browser> {
@@ -192,9 +214,15 @@ impl RsDisk {
         self.located.is_some()
     }
 
-    fn visible_rows(window: &Window) -> usize {
-        // The list fills the window below the header (about 90px).
-        let height: f32 = (window.viewport_size().height - px(90.)).into();
+    /// How many rows the list shows, from its height at the last paint (the header's height
+    /// varies with notes and warnings).
+    fn visible_rows(&self, window: &Window) -> usize {
+        let painted = self.scroll.0.borrow().base_handle.bounds().size.height;
+        let height: f32 = if painted > px(0.) {
+            painted.into()
+        } else {
+            (window.viewport_size().height - px(90.)).into()
+        };
         (height / ROW_HEIGHT).max(1.) as usize
     }
 
@@ -203,6 +231,9 @@ impl RsDisk {
         // in (one stray `a` switched the colour mode during a screenshot run).
         if std::env::var_os("RSDISK_NO_FOCUS").is_some() {
             return;
+        }
+        if self.note.take().is_some() {
+            cx.notify();
         }
         let k = &event.keystroke;
         if k.modifiers.platform {
@@ -271,9 +302,18 @@ impl RsDisk {
             Action::PrevMatch => self.step_found(false),
             Action::Rescan => self.rescan_folder(),
             Action::ScanCloud => self.scan_cloud(),
+            Action::ListUnreadable => self.open_unreadable(),
+            // Esc closes or stops the most recent thing: a rescan, the preview, the search
+            // position.
+            Action::Cancel if self.browser().is_some() => {
+                if !self.cancel_rescan() && !quick_look::close() {
+                    self.last_found = (Vec::new(), 0);
+                }
+            }
+            Action::Open => self.explain_unopenable(),
             _ => {}
         }
-        let rows = Self::visible_rows(window);
+        let rows = self.visible_rows(window);
         match &mut self.stage {
             Stage::Scanning { progress, .. } => {
                 if action == Action::Cancel {
@@ -298,7 +338,9 @@ impl RsDisk {
                     | Action::NextMatch
                     | Action::PrevMatch
                     | Action::Rescan
-                    | Action::ScanCloud => {}
+                    | Action::ScanCloud
+                    | Action::ListUnreadable
+                    | Action::Cancel => {}
                     Action::Help => self.help = true,
                     Action::Preview => {
                         if let Some(s) = b.selected() {
@@ -322,6 +364,39 @@ impl RsDisk {
             }
         }
         cx.notify();
+    }
+
+    /// The dimmed layer under help, search and dialogs. It takes the mouse, so rows and cells
+    /// behind it can't be clicked.
+    pub(crate) fn scrim(&self) -> Div {
+        div()
+            .absolute()
+            .top_0()
+            .left_0()
+            .size_full()
+            .flex()
+            .justify_center()
+            .items_center()
+            .bg(rgba((self.theme.bg << 8) | 0x99))
+            .occlude()
+    }
+
+    /// `l` on a folder that can't be entered says why, instead of doing nothing.
+    fn explain_unopenable(&mut self) {
+        let Some(b) = self.browser() else { return };
+        let Some(id) = b.selected() else { return };
+        let n = b.tree().node(id);
+        if !n.is_dir() || b.can_open(id) {
+            return;
+        }
+        let why = if n.has(flag::UNREADABLE) {
+            "is unreadable (see Full Disk Access)"
+        } else if n.has(flag::NOT_SCANNED) {
+            "wasn't scanned; c scans it"
+        } else {
+            "is on another volume, which rsdisk doesn't cross"
+        };
+        self.note = Some(format!("{} {why}", n.name));
     }
 
     /// Runs `f` on the browser (if browsing), keeps the list scrolled to the selection, and

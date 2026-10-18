@@ -1,10 +1,11 @@
 //! Marked items, the confirm dialog, and moving to the Trash (spec §3.8, §3.11).
 
-use crate::view::{RsDisk, Stage};
+use crate::theme::MONO;
+use crate::view::{RsDisk, Stage, grantee};
 use gpui_kit::{prelude::*, *};
 use rsdisk_core::format;
 use rsdisk_core::trash::{FinderTrash, apply, targets, trash_paths};
-use rsdisk_core::tree::NodeId;
+use rsdisk_core::tree::{NodeId, flag};
 use std::sync::mpsc::{Receiver, channel};
 
 /// How many marked paths the dialog lists before "and N more".
@@ -27,18 +28,31 @@ pub enum Dialog {
 }
 
 impl RsDisk {
-    /// `space`: marks or unmarks the selected row and moves down, as in dua.
+    /// `space`: marks or unmarks the selected row and moves down, as in dua. A refused mark
+    /// says why and stays put, so the refusal is seen.
     pub fn toggle_mark(&mut self) {
         if let Stage::Browsing(b) = &mut self.stage
             && let Some(id) = b.selected()
         {
-            self.marks.toggle(b.tree(), id);
-            b.down();
+            match self.marks.toggle(b.tree(), id) {
+                Some(why) => self.note = Some(why),
+                None => b.down(),
+            }
         }
     }
 
-    /// `d`: review the marked items.
+    /// `d`: review the marked items. Not during a rescan: its result was read before Finder
+    /// moves anything, so grafting it would bring trashed items back.
     pub fn open_confirm(&mut self) {
+        if let Some(r) = &self.rescan
+            && !self.marks.is_empty()
+        {
+            self.note = Some(format!(
+                "Wait for the scan of {} to finish, or Esc to stop it",
+                self.shown(&r.path)
+            ));
+            return;
+        }
         if let Stage::Browsing(b) = &self.stage
             && !self.marks.is_empty()
         {
@@ -163,21 +177,48 @@ impl RsDisk {
         )
     }
 
-    pub fn render_dialog(&self) -> Option<impl IntoElement + use<>> {
+    pub fn render_dialog(&self, cx: &mut Context<Self>) -> Option<impl IntoElement + use<>> {
         let dialog = self.dialog.as_ref()?;
         let b = self.browser()?;
         let t = &self.theme;
         let tree = b.tree();
+        let button = |id: &'static str, text: &'static str, key: &'static str, primary: bool| {
+            div()
+                .id(id)
+                .px_3()
+                .py_1()
+                .rounded_md()
+                .cursor_pointer()
+                .border_1()
+                .border_color(rgb(t.faint))
+                .when(primary, |d| {
+                    d.bg(rgb(t.text))
+                        .text_color(rgb(t.bg))
+                        .font_weight(FontWeight::SEMIBOLD)
+                })
+                .on_click(cx.listener(move |view, _: &ClickEvent, _, cx| {
+                    view.dialog_key(key);
+                    cx.notify();
+                }))
+                .child(text)
+        };
+        let buttons = div().flex().justify_end().gap_2().pt_2();
         let mut body = div().flex().flex_col().gap_2().w(px(560.));
         match dialog {
             Dialog::Confirm { ids, size } => {
                 let n = ids.len();
+                let unknown = |id: NodeId| tree.node(id).has(flag::UNREADABLE);
+                let at_least = if ids.iter().any(|&id| unknown(id)) {
+                    "at least "
+                } else {
+                    ""
+                };
                 body = body.child(
                     div()
                         .text_size(px(15.))
                         .font_weight(FontWeight::SEMIBOLD)
                         .child(format!(
-                            "Move {n} {} ({}) to the Trash?",
+                            "Move {n} {} ({at_least}{}) to the Trash?",
                             if n == 1 { "item" } else { "items" },
                             format::bytes(*size)
                         )),
@@ -186,21 +227,21 @@ impl RsDisk {
                     .flex()
                     .flex_col()
                     .gap_1()
-                    .font_family("Menlo")
+                    .font_family(MONO)
                     .text_size(px(12.));
-                for id in ids.iter().take(LISTED) {
-                    let path = tree.path(*id);
-                    let shown = path
-                        .strip_prefix(&self.root)
-                        .map(|p| p.display().to_string())
-                        .unwrap_or_else(|_| path.display().to_string());
+                for &id in ids.iter().take(LISTED) {
+                    let size = if unknown(id) {
+                        "size unknown".to_string()
+                    } else {
+                        format::bytes(tree.node(id).size)
+                    };
                     list = list.child(
                         div()
                             .flex()
                             .justify_between()
                             .gap_4()
-                            .child(div().min_w_0().truncate().child(shown))
-                            .child(div().child(format::bytes(tree.node(*id).size))),
+                            .child(div().min_w_0().truncate().child(self.shown(&tree.path(id))))
+                            .child(div().flex_shrink_0().child(size)),
                     );
                 }
                 if n > LISTED {
@@ -210,10 +251,17 @@ impl RsDisk {
                             .child(format!("and {} more", n - LISTED)),
                     );
                 }
-                body = body.child(list).child(div().text_color(rgb(t.dim)).child(
-                    "Finder moves them, so Put Back restores them. Enter or y to go ahead, \
-                     Esc to cancel.",
-                ));
+                body = body
+                    .child(list)
+                    .child(div().text_color(rgb(t.dim)).child(
+                        "Finder moves them, so Put Back restores them. Enter or y to go \
+                         ahead, Esc to cancel.",
+                    ))
+                    .child(
+                        buttons
+                            .child(button("cancel", "Cancel", "escape", false))
+                            .child(button("confirm", "Move to Trash", "enter", true)),
+                    );
             }
             Dialog::Trashing { count, .. } => {
                 body = body.child(format!(
@@ -226,27 +274,33 @@ impl RsDisk {
                 freed,
                 failed,
             } => {
+                let headline = if *moved == 0 {
+                    "Nothing was moved to the Trash".to_string()
+                } else {
+                    format!(
+                        "Moved {moved} {} to the Trash, {} freed",
+                        if *moved == 1 { "item" } else { "items" },
+                        format::bytes(*freed)
+                    )
+                };
                 body = body.child(
                     div()
                         .text_size(px(15.))
                         .font_weight(FontWeight::SEMIBOLD)
-                        .child(format!(
-                            "Moved {moved} {} to the Trash, {} freed",
-                            if *moved == 1 { "item" } else { "items" },
-                            format::bytes(*freed)
-                        )),
+                        .when(*moved == 0, |d| d.text_color(rgb(t.error)))
+                        .child(headline),
                 );
                 if !failed.is_empty() {
-                    body = body.child(
-                        div()
-                            .text_color(rgb(t.error))
-                            .child(format!("{} couldn't be moved:", failed.len())),
-                    );
+                    body = body.child(div().text_color(rgb(t.error)).child(format!(
+                        "{} couldn't be moved. They're still marked; fix the cause and press \
+                         d again.",
+                        failed.len()
+                    )));
                     let mut list = div().flex().flex_col().gap_1().text_size(px(12.));
                     for (path, why) in failed.iter().take(LISTED) {
                         list = list.child(
                             div()
-                                .child(div().font_family("Menlo").truncate().child(path.clone()))
+                                .child(div().font_family(MONO).truncate().child(path.clone()))
                                 .child(div().text_color(rgb(t.dim)).child(why.clone())),
                         );
                     }
@@ -255,10 +309,11 @@ impl RsDisk {
                         .iter()
                         .any(|(_, why)| why.contains("-1743") || why.contains("not allowed"));
                     if automation {
-                        body = body.child(div().text_color(rgb(t.accent)).child(
-                            "macOS blocked controlling Finder. Allow it for your terminal in \
-                             System Settings > Privacy & Security > Automation, then try again.",
-                        ));
+                        body = body.child(div().text_color(rgb(t.warning)).child(format!(
+                            "macOS blocked controlling Finder. Allow it for {} in System \
+                             Settings > Privacy & Security > Automation, then try again.",
+                            grantee()
+                        )));
                     }
                 }
                 body = body.child(
@@ -266,27 +321,19 @@ impl RsDisk {
                         .text_color(rgb(t.dim))
                         .child("Enter or Esc closes this"),
                 );
+                body = body.child(buttons.child(button("close", "Close", "escape", true)));
             }
         }
         Some(
-            div()
-                .absolute()
-                .top_0()
-                .left_0()
-                .size_full()
-                .flex()
-                .items_center()
-                .justify_center()
-                .bg(hsla(0., 0., 0., 0.25))
-                .child(
-                    div()
-                        .p_5()
-                        .rounded_lg()
-                        .bg(rgb(t.surface))
-                        .border_1()
-                        .border_color(rgb(t.faint))
-                        .child(body),
-                ),
+            self.scrim().child(
+                div()
+                    .p_5()
+                    .rounded_lg()
+                    .bg(rgb(t.surface))
+                    .border_1()
+                    .border_color(rgb(t.faint))
+                    .child(body),
+            ),
         )
     }
 }

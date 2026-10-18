@@ -20,6 +20,15 @@ rm -rf "$iconset"
 
 cp target/release/rsdisk "$app/Contents/MacOS/rsdisk"
 cp bundle/Info.plist "$app/Contents/Info.plist"
-# Ad-hoc signature, so macOS treats it as one app (Full Disk Access, Gatekeeper on this Mac).
-codesign --force --sign - "$app" >/dev/null
+# Signed with a fixed local certificate, so the Full Disk Access and Finder automation grants
+# survive rebuilds (they're tied to the signature, and an ad hoc one changes every build).
+# RSDISK_SIGN picks the certificate; without it, fall back to ad hoc and say what that costs.
+identity="${RSDISK_SIGN:-murmur dev}"
+if security find-identity -v -p codesigning | grep -qF "\"$identity\""; then
+    codesign --force --sign "$identity" "$app" >/dev/null
+else
+    echo "No \"$identity\" signing certificate; signing ad hoc. macOS will ask for Full Disk" \
+        "Access and Finder automation again after every install." >&2
+    codesign --force --sign - "$app" >/dev/null
+fi
 echo "$app"

@@ -7,7 +7,7 @@
 //! per-directory allocation.
 
 use crate::kind::{Kind, kind_of};
-use std::path::PathBuf;
+use std::path::{Path, PathBuf};
 
 pub type NodeId = u32;
 
@@ -179,6 +179,19 @@ impl Tree {
 
     pub fn path(&self, id: NodeId) -> PathBuf {
         path_of(&self.nodes, id)
+    }
+
+    /// The node at `path`, which must be the root's path or below it. Removed nodes are
+    /// skipped, so after a graft this finds the new copy.
+    pub fn find(&self, path: &Path) -> Option<NodeId> {
+        let rest = path.strip_prefix(self.path(self.root())).ok()?;
+        rest.components().try_fold(self.root(), |at, part| {
+            let name = part.as_os_str().to_str()?;
+            self.children(at).iter().copied().find(|c| {
+                let n = self.node(*c);
+                &*n.name == name && !n.has(flag::REMOVED)
+            })
+        })
     }
 
     pub fn node_mut(&mut self, id: NodeId) -> &mut Node {
@@ -519,6 +532,18 @@ mod tests {
         assert_eq!(t.node(media).kind, Kind::Image);
         assert_eq!(t.node(media).mtime, 2000);
         assert_eq!(t.node(t.root()).kind, Kind::Image);
+    }
+
+    #[test]
+    fn find_walks_a_path_down_from_the_root() {
+        let (mut t, [a, x, _, bb, ..]) = sample();
+        assert_eq!(t.find(Path::new("/r")), Some(t.root()));
+        assert_eq!(t.find(Path::new("/r/a/x")), Some(x));
+        assert_eq!(t.find(Path::new("/r/b")), Some(bb));
+        assert_eq!(t.find(Path::new("/r/a/nope")), None);
+        assert_eq!(t.find(Path::new("/elsewhere/a")), None);
+        t.remove(a);
+        assert_eq!(t.find(Path::new("/r/a/x")), None);
     }
 
     #[test]

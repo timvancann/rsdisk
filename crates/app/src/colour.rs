@@ -11,14 +11,14 @@ const RAMP: [u32; 3] = [0x4fa3a5, 0xd8c27a, 0xd9534f];
 /// The ramp ends at five years.
 const OLD_DAYS: f32 = 1825.;
 
-/// The fill for a cell: `None` is a merged "(other)" remainder.
+/// The fill for a cell: `None` is a folder's merged small items.
 pub fn fill(node: Option<&Node>, mode: ColourMode, theme: &Theme, now: u64) -> u32 {
     let Some(n) = node else {
-        return theme.faint;
+        return theme.small_items();
     };
     match mode {
         ColourMode::Kind => theme.kind(n.kind),
-        ColourMode::Age if n.mtime == 0 => theme.faint,
+        ColourMode::Age if n.mtime == 0 => theme.dim,
         ColourMode::Age => age(now.saturating_sub(n.mtime as u64) as f32 / DAY),
     }
 }
@@ -94,8 +94,10 @@ mod tests {
         let t = builtin_dark();
         assert_eq!(
             fill(Some(&node(Kind::Video, u64::MAX)), ColourMode::Age, &t, NOW),
-            t.faint
+            t.dim
         );
-        assert_eq!(fill(None, ColourMode::Kind, &t, NOW), t.faint);
+        assert_eq!(fill(None, ColourMode::Kind, &t, NOW), t.small_items());
+        assert_ne!(t.small_items(), t.dim);
+        assert_ne!(t.small_items(), t.surface);
     }
 }

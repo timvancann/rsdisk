@@ -3,27 +3,94 @@
 
 use rsdisk_core::tree::{NodeId, Tree, flag};
 use std::collections::BTreeSet;
+use std::path::PathBuf;
 
 #[derive(Debug, Default, Clone)]
 pub struct Marks {
     ids: BTreeSet<NodeId>,
+    /// Nodes that must never go to the Trash, with why; see `guard`.
+    guarded: Vec<(NodeId, &'static str)>,
 }
 
 impl Marks {
-    /// Marks or unmarks `id`. The root can't be marked, an item inside a marked folder is
-    /// already covered, and marking a folder drops the marks inside it.
-    pub fn toggle(&mut self, tree: &Tree, id: NodeId) {
+    /// Marks or unmarks `id`, or returns why it can't be marked. The root can't be marked,
+    /// nor a guarded item or a folder holding one; an item inside a marked folder is already
+    /// covered, and marking a folder drops the marks inside it.
+    pub fn toggle(&mut self, tree: &Tree, id: NodeId) -> Option<String> {
         if id == tree.root() || tree.node(id).has(flag::REMOVED) {
-            return;
+            return None;
         }
         if self.ids.remove(&id) {
-            return;
+            return None;
         }
         if self.covered_by_ancestor(tree, id) {
-            return;
+            return None;
+        }
+        if let Some(why) = self.refusal(tree, id) {
+            return Some(why);
         }
         self.ids.retain(|m| !is_below(tree, *m, id));
         self.ids.insert(id);
+        None
+    }
+
+    /// Guards against trashing cloud folders (`cloud`, each folder directly inside them, and
+    /// everything holding them), folders that weren't scanned, and other volumes. Their size
+    /// shows as 0 B or is unknown, so a mark on them would look harmless; trashing iCloud
+    /// Drive or a Google Drive account deletes files on every device. Call again whenever the
+    /// tree changes.
+    pub fn guard(&mut self, tree: &Tree, cloud: &[PathBuf]) {
+        let mut guarded = Vec::new();
+        for id in 0..tree.len() as NodeId {
+            let n = tree.node(id);
+            if n.has(flag::REMOVED) {
+                continue;
+            }
+            if n.has(flag::NOT_SCANNED) {
+                guarded.push((id, "not scanned"));
+            } else if n.has(flag::OTHER_VOLUME) {
+                guarded.push((id, "on another volume"));
+            }
+        }
+        let root = tree.path(tree.root());
+        for c in cloud {
+            let folder = if root.starts_with(c) {
+                // Scanning from inside a cloud folder: only its own folders are in the tree.
+                (&root == c).then(|| tree.root())
+            } else {
+                tree.find(c)
+            };
+            if let Some(f) = folder {
+                guarded.push((f, "a cloud folder"));
+                guarded.extend(tree.children(f).iter().map(|&c| (c, "a cloud folder")));
+            }
+        }
+        self.guarded = guarded;
+        self.ids.retain(|m| {
+            !self
+                .guarded
+                .iter()
+                .any(|(g, _)| g == m || is_below(tree, *g, *m))
+        });
+    }
+
+    fn refusal(&self, tree: &Tree, id: NodeId) -> Option<String> {
+        let name = &tree.node(id).name;
+        self.guarded
+            .iter()
+            .filter(|(g, _)| !tree.node(*g).has(flag::REMOVED))
+            .find_map(|&(g, why)| {
+                if g == id {
+                    Some(format!("Can't mark {name}: it is {why}"))
+                } else if is_below(tree, g, id) {
+                    let inner = &tree.node(g).name;
+                    Some(format!(
+                        "Can't mark {name}: it holds {inner}, which is {why}"
+                    ))
+                } else {
+                    None
+                }
+            })
     }
 
     pub fn clear(&mut self) {
@@ -85,7 +152,7 @@ impl Marks {
 }
 
 /// Whether `id` lies strictly below `folder`.
-fn is_below(tree: &Tree, id: NodeId, folder: NodeId) -> bool {
+pub(crate) fn is_below(tree: &Tree, id: NodeId, folder: NodeId) -> bool {
     let mut at = tree.node(id).parent();
     while let Some(p) = at {
         if p == folder {
@@ -166,6 +233,44 @@ mod tests {
         m.toggle(&t, b);
         assert_eq!(m.total_size(&t), 35);
         assert_eq!(m.total_files(&t), 3);
+    }
+
+    /// /r { Library { CloudStorage { GoogleDrive-x { doc:7 } }, Caches:9 }, vol, a:3 }
+    fn cloud_tree() -> (Tree, [NodeId; 6]) {
+        let mut b = TreeBuilder::new(dir("/r"));
+        let mut vol = dir("vol");
+        vol.flags |= flag::OTHER_VOLUME;
+        let lib = b.add_children(0, [dir("Library"), vol, file("a", 3)]);
+        let cloud = b.add_children(lib, [dir("CloudStorage"), file("Caches", 9)]);
+        let drive = b.add_children(cloud, [dir("GoogleDrive-x")]);
+        let doc = b.add_children(drive, [file("doc", 7)]);
+        (b.finish(), [lib, lib + 1, cloud, cloud + 1, drive, doc])
+    }
+
+    #[test]
+    fn cloud_folders_and_what_holds_them_cannot_be_marked() {
+        let (t, [lib, vol, cloud, caches, drive, doc]) = cloud_tree();
+        let mut m = Marks::default();
+        m.guard(&t, &[PathBuf::from("/r/Library/CloudStorage")]);
+        for id in [lib, cloud, drive, vol] {
+            assert!(m.toggle(&t, id).is_some(), "{}", t.node(id).name);
+        }
+        assert!(m.is_empty());
+        let why = m.toggle(&t, lib).unwrap();
+        assert!(why.contains("CloudStorage"), "{why}");
+        // Next to and deep inside a cloud folder is fine.
+        assert_eq!(m.toggle(&t, caches), None);
+        assert_eq!(m.toggle(&t, doc), None);
+        assert_eq!(m.ids(&t), [caches, doc]);
+    }
+
+    #[test]
+    fn guarding_drops_marks_it_now_refuses() {
+        let (t, [lib, ..]) = cloud_tree();
+        let mut m = Marks::default();
+        m.toggle(&t, lib);
+        m.guard(&t, &[PathBuf::from("/r/Library/CloudStorage")]);
+        assert!(m.is_empty());
     }
 
     #[test]

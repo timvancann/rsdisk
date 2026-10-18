@@ -1,5 +1,6 @@
 //! The scan screen: live counters while the walk runs (spec §2.6).
 
+use crate::theme::MONO;
 use crate::view::RsDisk;
 use gpui_kit::*;
 use rsdisk_core::format;
@@ -23,13 +24,15 @@ pub fn count(n: u64) -> String {
 impl RsDisk {
     pub fn render_scanning(&self, progress: &Progress, started: Instant) -> impl IntoElement {
         let t = &self.theme;
+        // Fixed widths, so the columns don't shift as the numbers grow.
         let stat = |label: &str, value: String| {
             div()
+                .w(px(160.))
                 .flex()
                 .flex_col()
                 .gap_1()
                 .child(div().text_color(rgb(t.dim)).child(label.to_string()))
-                .child(div().font_family("Menlo").text_size(px(22.)).child(value))
+                .child(div().font_family(MONO).text_size(px(22.)).child(value))
         };
         let latest = progress.latest();
         let shown = latest
@@ -51,7 +54,7 @@ impl RsDisk {
             .child(
                 div()
                     .flex()
-                    .gap_10()
+                    .gap_4()
                     .child(stat("Size", format::bytes(progress.bytes.load(Relaxed))))
                     .child(stat("Files", count(progress.files.load(Relaxed))))
                     .child(stat("Folders", count(progress.dirs.load(Relaxed))))
@@ -64,10 +67,13 @@ impl RsDisk {
                 div()
                     .w(px(640.))
                     .text_color(rgb(t.dim))
-                    .font_family("Menlo")
+                    .font_family(MONO)
                     .text_size(px(12.))
                     .text_center()
-                    .truncate()
+                    // Cut from the start: the end of a path says what it is.
+                    .overflow_hidden()
+                    .whitespace_nowrap()
+                    .text_ellipsis_start()
                     .child(shown),
             )
             .child(

@@ -12,7 +12,7 @@ around with vim keys or the mouse, and moves what you pick to the Trash.
 The use case is "I need disk space back, quickly". Every feature is judged against that.
 
 **Out of scope for v1:** permanent delete, saved or cached scans, a live-updating tree during
-the scan, an `.app` bundle, APFS clone detection, zoxide integration, a volumes start screen,
+the scan, APFS clone detection, zoxide integration, a volumes start screen,
 scanning across volume boundaries.
 
 ## 2. Decisions
@@ -64,9 +64,12 @@ Each: the question, the answer, why, and what was rejected.
     immediate delete, `NSFileManager` (no "Put Back").
 12. **Search.** `/` fuzzy-matches paths across the whole scanned tree and jumps to the result.
     Rejected: filtering only the current folder.
-13. **Running.** v1 is a binary launched from the terminal (`rsdisk [path]`), which borrows the
-    terminal's Full Disk Access. Rejected for v1: an `.app` bundle, which needs its own grant
-    and can lose it on every re-sign.
+13. **Running.** RSdisk.app, built and installed with `just install` and started from the
+    Dock (scans `~`); `rsdisk [path]` from a terminal still works. Revised 2026-10-18: v1 was
+    terminal only, borrowing the terminal's Full Disk Access; Tim now starts it from the Dock.
+    The app needs its own Full Disk Access and Finder automation grants, so it is signed with
+    one fixed local certificate, which keeps those grants across rebuilds (an ad hoc
+    signature changes every build and loses them).
 14. **Persistence.** No scan cache; every launch scans fresh. Only settings persist (§3.12).
 15. **Theming.** Installed Zed themes, loaded the way Jasmijn and Riff do it (copied, not
     shared), mapped onto our colour roles and pushed into gpui-component's theme. Follows the
@@ -134,7 +137,12 @@ about 750 MB during the scan.
 - Cloud folders (§2.8): matched by path under the scan root. Shown with a not-scanned flag.
   Scanning one on demand runs §3.2 on that subtree and splices the result in.
 - Unreadable directories (§2.9): flagged, size unknown (counted as 0 in totals), path added
-  to the error list. The total is shown as "at least" when any error exists.
+  to the error list. The total is shown as "at least" when any error exists, or the scan was
+  stopped early. `e` lists them, to step through like search results.
+- Cloud folders (and each account or app folder directly inside them), not-scanned folders
+  and other volumes can't be marked, nor any folder holding one: their size reads 0 B or
+  unknown, so a mark would look harmless, and trashing iCloud Drive or a Google Drive account
+  deletes files on every device. A refused mark says why.
 
 ### 3.6 File kinds and age
 
@@ -168,11 +176,18 @@ Exported JSON holds personal paths and is gitignored.
 ### 3.8 Window layout
 
 - The list sits on the left and the visual pane (treemap or sunburst, §2.10) on the right.
-  Above them: the breadcrumb of the current folder and the scan totals.
+  Above them: the breadcrumb of the current folder (one line; deep paths collapse the middle)
+  and the folder's size and file count, then the scan total. Under the list, one line about
+  the selected item: its path, size, files, kind and age, the same as the visual's tooltip.
+- A note line in the header answers keys that can't do what was asked (a refused mark, a
+  folder that can't be opened); the next key clears it.
 - The visual always shows the folder the list is in. Opening or leaving a folder in either
   moves both, and the selected item is highlighted in both.
 - The visual draws down until cells would be a few pixels small and merges what's left in a
-  folder into one neutral "(other)" cell, as the mockup does.
+  folder into one neutral "small items" cell, as the mockup does.
+- Colour roles: data colours (kinds, the age ramp) are never reused for state. Marks are a
+  dashed outline in the text colour and an inverted "marked" tag in the list; the selection is
+  a solid outline; warnings have their own colour.
 - Marked items get their own pane along the bottom, shown only while anything is marked:
   "N items, X GB", with `d` to review and trash and `u` to clear.
 
@@ -188,9 +203,12 @@ Starting set, refined during the GUI plans:
   cloud folder.
 - `v` switch the visual (treemap, sunburst), `a` switch colour (kind, age).
 - `o` reveal in Finder, `p` preview the selected item in the Quick Look panel, which follows the
-  selection while open (again closes it),
+  selection while open (again closes it), `e` list the unreadable folders,
   `?` help, `q` quit.
+- `Esc` stops a rescan, else closes the preview, else forgets the last search's results.
 - Mouse: click selects, double-click opens, clicking a cell in the visual selects that item.
+  Dialogs have buttons, search results can be clicked, and overlays block clicks to what is
+  behind them.
 
 ### 3.10 Search
 
@@ -208,7 +226,10 @@ one opens its parent and selects it; `n`/`N` step through the results afterwards
   slow.
 - Each success removes the node and subtracts its size and file count from every ancestor.
   Each failure stays in the tree and is reported in the dialog.
-- The scan root is never markable.
+- The scan root is never markable, nor what §3.5 guards.
+- A rescan (`r`, `c`) shows its counters in the header and Esc stops it. Marks inside the
+  rescanned folder carry over by path. `d` waits for a running rescan: its result was read
+  before Finder moved anything, so grafting it in would bring trashed items back.
 
 ### 3.12 Theming and settings
 
@@ -223,8 +244,10 @@ one opens its parent and selects it; `n`/`N` step through the results afterwards
 
 ### 3.13 Running and permissions
 
-`rsdisk [path]` from a terminal. When the error count suggests missing Full Disk Access
-(any unreadable directory under `~/Library`), the summary says so and names the setting.
+RSdisk.app from the Dock, or `rsdisk [path]` from a terminal (§2.13). When the errors
+suggest missing Full Disk Access (any unreadable folder under `~/Library`, `~/Desktop`,
+`~/Documents` or `~/Downloads`), the summary says so and names the setting. Permission
+messages name RSdisk when it runs from its bundle and the terminal otherwise.
 
 ### 3.14 Performance
 
@@ -252,3 +275,5 @@ one opens its parent and selects it; `n`/`N` step through the results afterwards
 - Plan 04, visuals: treemap and sunburst as custom gpui elements, in sync with the list.
 - Plan 05, cleanup: marks and their pane, the confirm dialog, Trash, search, rescanning a
   folder (`r`) and scanning a cloud folder on demand (`c`).
+- Plan 06, review fixes: the UX and UI review of 2026-10-18 (guarding cloud folders, the app
+  bundle's permissions, rescan safety, keyboard details, colour roles, labels).
