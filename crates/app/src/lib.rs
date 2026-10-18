@@ -2,5 +2,6 @@
 //! the views only draw them and forward input.
 
 pub mod browser;
+pub mod keys;
 pub mod settings;
 pub mod theme;
