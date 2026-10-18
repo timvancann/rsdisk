@@ -3,5 +3,8 @@
 
 pub mod browser;
 pub mod keys;
+mod list_view;
+mod scanning;
 pub mod settings;
 pub mod theme;
+pub mod view;

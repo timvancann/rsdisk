@@ -1,20 +1,6 @@
 use gpui_kit::*;
+use rsdisk_app::view::RsDisk;
 use std::path::PathBuf;
-
-struct Shell {
-    root: PathBuf,
-}
-
-impl Render for Shell {
-    fn render(&mut self, _: &mut Window, _: &mut Context<Self>) -> impl IntoElement {
-        div()
-            .size_full()
-            .flex()
-            .items_center()
-            .justify_center()
-            .child(self.root.display().to_string())
-    }
-}
 
 fn main() {
     let home = std::env::home_dir().expect("no home folder");
@@ -23,8 +9,14 @@ fn main() {
         .map(PathBuf::from)
         .unwrap_or(home);
     let root = std::path::absolute(&root).unwrap_or(root);
-    // Screenshot launches must not take keyboard focus from whatever Tim is typing in.
+    // Screenshot launches must not take keyboard focus from whatever Tim is typing in. They
+    // float above other windows instead: macOS stops redrawing a covered window.
     let focus = std::env::var_os("RSDISK_NO_FOCUS").is_none();
+    let kind = if focus {
+        WindowKind::Normal
+    } else {
+        WindowKind::PopUp
+    };
 
     application().run(move |cx: &mut App| {
         gpui_kit::init(cx);
@@ -38,10 +30,11 @@ fn main() {
                     ..Default::default()
                 }),
                 focus,
+                kind,
                 ..Default::default()
             },
             cx,
-            |_, cx| cx.new(|_| Shell { root: root.clone() }),
+            |window, cx| cx.new(|cx| RsDisk::new(root.clone(), window, cx)),
         )
         .expect("couldn't open the window");
         if focus {
