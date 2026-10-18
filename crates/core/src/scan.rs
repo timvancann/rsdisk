@@ -73,7 +73,6 @@ pub struct ScanResult {
 /// One listed entry, with its subtree when it is a directory that was entered.
 struct Entry {
     node: Node,
-    dev: u64,
     children: Vec<Entry>,
 }
 
@@ -134,7 +133,8 @@ pub fn scan(root: &Path, opts: &ScanOptions, progress: &Progress) -> ScanResult 
     }
     progress.bytes.fetch_add(root_entry.node.size, Relaxed);
 
-    let tree = flatten(root_entry);
+    let count = progress.files.load(Relaxed) + progress.dirs.load(Relaxed);
+    let tree = flatten(root_entry, count as usize);
     let mut errors = ctx.errors.into_inner().unwrap_or_default();
     errors.sort_by(|a, b| a.path.cmp(&b.path));
     ScanResult {
@@ -155,13 +155,18 @@ impl Ctx<'_> {
         }
     }
 
-    /// A node for one entry, without its children. Hardlinked files count once.
+    /// A node for one entry, without its children. Hardlinked files count once; a directory
+    /// on another volume counts as nothing and is flagged so it isn't entered.
     fn entry(&self, name: Box<str>, meta: &Metadata) -> Entry {
         let ft = meta.file_type();
         let mut flags = 0;
         let mut size = allocated(meta);
         let kind = if ft.is_dir() {
             flags |= flag::DIR;
+            if crosses_volume(self.root_dev, meta.dev()) {
+                flags |= flag::OTHER_VOLUME;
+                size = 0;
+            }
             if kind_of(&name) == Kind::App {
                 Kind::App
             } else {
@@ -181,7 +186,6 @@ impl Ctx<'_> {
         };
         Entry {
             node: Node::new(name, size, meta.mtime(), kind, flags),
-            dev: meta.dev(),
             children: Vec::new(),
         }
     }
@@ -234,16 +238,14 @@ impl Ctx<'_> {
         self.progress.files.fetch_add(files, Relaxed);
         self.progress.dirs.fetch_add(dirs, Relaxed);
         self.progress.bytes.fetch_add(bytes, Relaxed);
+        entries.shrink_to_fit();
 
         entries
             .par_iter_mut()
-            .filter(|e| e.node.is_dir())
+            .filter(|e| e.node.is_dir() && !e.node.has(flag::OTHER_VOLUME))
             .for_each(|e| {
                 let path = dir.join(&*e.node.name);
-                if crosses_volume(self.root_dev, e.dev) {
-                    e.node.flags |= flag::OTHER_VOLUME;
-                    e.node.size = 0;
-                } else if self.opts.skip.contains(&path) {
+                if self.opts.skip.contains(&path) {
                     e.node.flags |= flag::NOT_SCANNED;
                 } else {
                     e.children = self.list(&path, &mut e.node);
@@ -253,16 +255,22 @@ impl Ctx<'_> {
     }
 }
 
-fn flatten(root: Entry) -> Tree {
-    let mut builder = TreeBuilder::new(root.node);
+/// `count` is the number of nodes, so the arena is allocated once instead of doubling.
+fn flatten(root: Entry, count: usize) -> Tree {
+    let mut builder = TreeBuilder::with_capacity(root.node, count);
     let mut stack: Vec<(NodeId, Vec<Entry>)> = vec![(0, root.children)];
     while let Some((parent, children)) = stack.pop() {
-        for child in children {
-            let id = builder.add(parent, child.node);
-            if !child.children.is_empty() {
-                stack.push((id, child.children));
-            }
-        }
+        let mut grandchildren = Vec::new();
+        let first = builder.add_children(
+            parent,
+            children.into_iter().enumerate().map(|(i, child)| {
+                if !child.children.is_empty() {
+                    grandchildren.push((i as NodeId, child.children));
+                }
+                child.node
+            }),
+        );
+        stack.extend(grandchildren.into_iter().map(|(i, g)| (first + i, g)));
     }
     builder.finish()
 }

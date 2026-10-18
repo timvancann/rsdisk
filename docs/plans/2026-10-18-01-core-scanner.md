@@ -23,6 +23,11 @@ arena; sizes roll up after the walk; atomic counters report progress. No gpui an
 stores its kind. The builder takes parents before children (the walk produces them in that
 order anyway), not "any order".
 
+**Ruling after Task 5:** the first full `~` scan peaked at 1.12 GB, over the §3.14 budget.
+The tree moved from a `Vec` of children per node to consecutive child ids plus one shared
+order array (`add_children` replaces `add`), node size went from 72 to 48 bytes, and
+`mtime` became `u32`. Peak dropped to about 750 MB.
+
 ### Task 1: Workspace skeleton
 
 **Files:** create `Cargo.toml` (workspace), `crates/core/Cargo.toml`, `crates/core/src/lib.rs`,

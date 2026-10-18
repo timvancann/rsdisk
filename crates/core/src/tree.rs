@@ -1,5 +1,10 @@
 //! The size tree: an arena of nodes built once after a scan and afterwards only shrunk by
 //! deletions (spec §3.3).
+//!
+//! A directory's children are added in one go, so they get consecutive ids. Their sorted
+//! order lives in `order`, a permutation of all ids where each directory owns the slice
+//! `order[child_start..child_start + child_len]`. That keeps a node at 48 bytes with no
+//! per-directory allocation.
 
 use crate::kind::Kind;
 use std::path::PathBuf;
@@ -24,12 +29,13 @@ pub struct Node {
     pub name: Box<str>,
     /// Allocated bytes; for a directory, its own blocks plus every descendant's.
     pub size: u64,
-    /// Modified time, unix seconds.
-    pub mtime: i64,
     /// Files at or below this node (a file counts itself).
     pub files: u32,
+    /// Modified time, unix seconds (clamped to 0 before 1970).
+    pub mtime: u32,
     parent: NodeId,
-    children: Vec<NodeId>,
+    child_start: u32,
+    child_len: u32,
     pub kind: Kind,
     pub flags: u8,
 }
@@ -40,10 +46,11 @@ impl Node {
         Node {
             name: name.into(),
             size,
-            mtime,
             files: if flags & flag::DIR == 0 { 1 } else { 0 },
+            mtime: mtime.clamp(0, u32::MAX as i64) as u32,
             parent: NO_PARENT,
-            children: Vec::new(),
+            child_start: 0,
+            child_len: 0,
             kind,
             flags,
         }
@@ -69,7 +76,7 @@ pub struct TreeBuilder {
 
 impl TreeBuilder {
     pub fn new(root: Node) -> Self {
-        TreeBuilder { nodes: vec![root] }
+        Self::with_capacity(root, 1)
     }
 
     pub fn with_capacity(root: Node, capacity: usize) -> Self {
@@ -78,17 +85,25 @@ impl TreeBuilder {
         TreeBuilder { nodes }
     }
 
-    /// Adds `node` under `parent`, which must already be in the builder.
-    pub fn add(&mut self, parent: NodeId, mut node: Node) -> NodeId {
-        let id = self.nodes.len() as NodeId;
-        node.parent = parent;
-        self.nodes.push(node);
-        self.nodes[parent as usize].children.push(id);
-        id
-    }
-
-    pub fn node_mut(&mut self, id: NodeId) -> &mut Node {
-        &mut self.nodes[id as usize]
+    /// Adds all of `parent`'s children at once and returns the first child's id; the rest
+    /// follow consecutively. `parent` must already be in the builder and get its children
+    /// only once.
+    pub fn add_children(
+        &mut self,
+        parent: NodeId,
+        children: impl IntoIterator<Item = Node>,
+    ) -> NodeId {
+        let first = self.nodes.len() as NodeId;
+        self.nodes.extend(children.into_iter().map(|mut n| {
+            n.parent = parent;
+            n
+        }));
+        let len = self.nodes.len() as u32 - first;
+        let p = &mut self.nodes[parent as usize];
+        debug_assert_eq!(p.child_len, 0, "children added twice");
+        p.child_start = first;
+        p.child_len = len;
+        first
     }
 
     pub fn finish(mut self) -> Tree {
@@ -103,18 +118,26 @@ impl TreeBuilder {
             p.size += size;
             p.files += files;
         }
-        let sizes: Vec<u64> = self.nodes.iter().map(|n| n.size).collect();
-        for n in &mut self.nodes {
-            n.children
-                .sort_unstable_by(|a, b| sizes[*b as usize].cmp(&sizes[*a as usize]));
+        let mut order: Vec<NodeId> = (0..self.nodes.len() as NodeId).collect();
+        for n in &self.nodes {
+            let range = n.child_start as usize..(n.child_start + n.child_len) as usize;
+            order[range].sort_unstable_by(|a, b| {
+                self.nodes[*b as usize]
+                    .size
+                    .cmp(&self.nodes[*a as usize].size)
+            });
         }
-        Tree { nodes: self.nodes }
+        Tree {
+            nodes: self.nodes,
+            order,
+        }
     }
 }
 
 #[derive(Debug, Clone)]
 pub struct Tree {
     nodes: Vec<Node>,
+    order: Vec<NodeId>,
 }
 
 impl Tree {
@@ -128,7 +151,8 @@ impl Tree {
 
     /// Children, largest first.
     pub fn children(&self, id: NodeId) -> &[NodeId] {
-        &self.nodes[id as usize].children
+        let n = &self.nodes[id as usize];
+        &self.order[n.child_start as usize..(n.child_start + n.child_len) as usize]
     }
 
     /// Every node ever added, including removed ones (check `flag::REMOVED`).
@@ -161,7 +185,15 @@ impl Tree {
         }
         let (size, files) = (n.size, n.files);
         self.nodes[id as usize].flags |= flag::REMOVED;
-        self.nodes[parent as usize].children.retain(|c| *c != id);
+
+        let p = &mut self.nodes[parent as usize];
+        let start = p.child_start as usize;
+        let siblings = &mut self.order[start..start + p.child_len as usize];
+        if let Some(pos) = siblings.iter().position(|c| *c == id) {
+            siblings[pos..].rotate_left(1);
+            p.child_len -= 1;
+        }
+
         let mut at = Some(parent);
         while let Some(i) = at {
             let p = &mut self.nodes[i as usize];
@@ -187,13 +219,11 @@ mod tests {
     /// /r { a { x:10, y:30 }, b:5, c { z:100 } }
     fn sample() -> (Tree, [NodeId; 6]) {
         let mut b = TreeBuilder::new(dir("/r"));
-        let a = b.add(0, dir("a"));
-        let x = b.add(a, file("x", 10));
-        let y = b.add(a, file("y", 30));
-        let bb = b.add(0, file("b", 5));
-        let c = b.add(0, dir("c"));
-        let z = b.add(c, file("z", 100));
-        let _ = (x, z);
+        let a = b.add_children(0, [dir("a"), file("b", 5), dir("c")]);
+        let (bb, c) = (a + 1, a + 2);
+        let x = b.add_children(a, [file("x", 10), file("y", 30)]);
+        let y = x + 1;
+        let z = b.add_children(c, [file("z", 100)]);
         (b.finish(), [a, x, y, bb, c, z])
     }
 
@@ -224,16 +254,17 @@ mod tests {
 
     #[test]
     fn remove_updates_every_ancestor_and_detaches() {
-        let (mut t, [a, _, y, _, c, _]) = sample();
+        let (mut t, [a, x, y, bb, c, _]) = sample();
         t.remove(y);
         assert_eq!(t.node(a).size, 10);
         assert_eq!(t.node(a).files, 1);
         assert_eq!(t.node(t.root()).size, 115);
         assert_eq!(t.node(t.root()).files, 3);
-        assert!(!t.children(a).contains(&y));
+        assert_eq!(t.children(a), &[x]);
         assert!(t.node(y).has(flag::REMOVED));
         t.remove(c);
         assert_eq!(t.node(t.root()).size, 15);
+        assert_eq!(t.children(t.root()), &[a, bb]);
     }
 
     #[test]
@@ -247,11 +278,12 @@ mod tests {
     }
 
     #[test]
+    fn mtime_before_1970_clamps_to_zero() {
+        assert_eq!(Node::new("old", 0, -5, Kind::Other, 0).mtime, 0);
+    }
+
+    #[test]
     fn nodes_stay_small() {
-        assert!(
-            std::mem::size_of::<Node>() < 100,
-            "{}",
-            std::mem::size_of::<Node>()
-        );
+        assert_eq!(std::mem::size_of::<Node>(), 48);
     }
 }

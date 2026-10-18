@@ -100,8 +100,10 @@ An arena: `Vec<Node>` indexed by `u32`, built once after the scan and then only 
 deletions. Each node holds its name (not the full path; paths are rebuilt by walking parents),
 parent index, children, allocated size (for a directory: its own blocks plus all descendants),
 file count, kind (§3.6), modified time, and flags: directory, unreadable, not-scanned, symlink.
-Children are kept sorted by size, largest first. Target footprint is under 100 bytes per node
-plus the name, which keeps a 5-million-entry home folder well under 1 GB.
+Children are kept sorted by size, largest first. A directory's children get consecutive ids,
+and their sorted order lives in one shared permutation array, so a node is 48 bytes plus its
+name with no per-directory allocation. Measured: a 4.3-million-entry home folder peaks at
+about 750 MB during the scan.
 
 ### 3.4 Size rules
 
