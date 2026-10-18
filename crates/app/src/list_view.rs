@@ -20,6 +20,8 @@ const HELP: &[(&str, &str)] = &[
     ("Space", "mark / unmark, then down"),
     ("u", "clear marks"),
     ("/", "search the whole scan"),
+    ("r", "rescan this folder"),
+    ("c", "scan the selected cloud folder"),
     ("n / N", "next / previous search result"),
     ("d", "review marked and move to the Trash"),
     ("v", "treemap / sunburst"),
@@ -119,6 +121,15 @@ impl RsDisk {
         ];
         if result.cancelled {
             totals.push("scan stopped early".into());
+        }
+        if let Some(r) = &self.rescan {
+            let shown = r
+                .path
+                .strip_prefix(&self.root)
+                .ok()
+                .filter(|p| !p.as_os_str().is_empty())
+                .map_or_else(|| r.path.display().to_string(), |p| p.display().to_string());
+            totals.push(format!("scanning {shown}"));
         }
         if self.locating() {
             totals.push(format!("{errors} unreadable, finding which"));

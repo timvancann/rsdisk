@@ -6,6 +6,7 @@ use crate::cleanup::Dialog;
 use crate::find::Find;
 use crate::keys::{Action, Keymap};
 use crate::marks::Marks;
+use crate::rescan::Rescan;
 use crate::settings::{ColourMode, Settings, Visual};
 use crate::theme::{self, Theme};
 use crate::visual::{Hover, VisualCache};
@@ -49,6 +50,7 @@ pub struct RsDisk {
     pub(crate) find: Option<Find>,
     /// The last search's results and where `n`/`N` are in them.
     pub(crate) last_found: (Vec<NodeId>, usize),
+    pub(crate) rescan: Option<Rescan>,
     themes: Vec<Theme>,
     keymap: Keymap,
     focus: FocusHandle,
@@ -106,6 +108,7 @@ impl RsDisk {
             dialog: None,
             find: None,
             last_found: (Vec::new(), 0),
+            rescan: None,
             keymap: Keymap::default(),
             focus,
             located: None,
@@ -150,7 +153,7 @@ impl RsDisk {
             cx.notify();
             return;
         }
-        if self.poll_trash() {
+        if self.poll_trash() | self.poll_rescan() {
             cx.notify();
         }
         if let Some(rx) = &self.located
@@ -265,6 +268,8 @@ impl RsDisk {
             Action::Search => self.open_find(),
             Action::NextMatch => self.step_found(true),
             Action::PrevMatch => self.step_found(false),
+            Action::Rescan => self.rescan_folder(),
+            Action::ScanCloud => self.scan_cloud(),
             _ => {}
         }
         let rows = Self::visible_rows(window);
@@ -290,7 +295,9 @@ impl RsDisk {
                     | Action::Trash
                     | Action::Search
                     | Action::NextMatch
-                    | Action::PrevMatch => {}
+                    | Action::PrevMatch
+                    | Action::Rescan
+                    | Action::ScanCloud => {}
                     Action::Help => self.help = true,
                     Action::Reveal => {
                         if let Some(s) = b.selected() {
