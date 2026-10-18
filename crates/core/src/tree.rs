@@ -69,6 +69,17 @@ impl Node {
     }
 }
 
+fn path_of(nodes: &[Node], id: NodeId) -> PathBuf {
+    let mut names = Vec::new();
+    let mut at = Some(id);
+    while let Some(i) = at {
+        let n = &nodes[i as usize];
+        names.push(&*n.name);
+        at = n.parent();
+    }
+    names.iter().rev().collect()
+}
+
 /// Collects nodes, parents before children, then rolls sizes up in `finish`.
 pub struct TreeBuilder {
     nodes: Vec<Node>,
@@ -104,6 +115,21 @@ impl TreeBuilder {
         p.child_start = first;
         p.child_len = len;
         first
+    }
+
+    pub fn node_mut(&mut self, id: NodeId) -> &mut Node {
+        &mut self.nodes[id as usize]
+    }
+
+    /// Directories with no children and none of the `exclude` flags, with their paths.
+    pub fn childless_dirs(&self, exclude: u8) -> Vec<(NodeId, PathBuf)> {
+        (0..self.nodes.len() as NodeId)
+            .filter(|id| {
+                let n = &self.nodes[*id as usize];
+                n.is_dir() && n.child_len == 0 && !n.has(exclude)
+            })
+            .map(|id| (id, path_of(&self.nodes, id)))
+            .collect()
     }
 
     pub fn finish(mut self) -> Tree {
@@ -165,14 +191,7 @@ impl Tree {
     }
 
     pub fn path(&self, id: NodeId) -> PathBuf {
-        let mut names = Vec::new();
-        let mut at = Some(id);
-        while let Some(i) = at {
-            let n = self.node(i);
-            names.push(&*n.name);
-            at = n.parent();
-        }
-        names.iter().rev().collect()
+        path_of(&self.nodes, id)
     }
 
     /// Detaches `id` from the tree and subtracts its size and file count from every ancestor.

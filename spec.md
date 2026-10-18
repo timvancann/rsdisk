@@ -23,8 +23,12 @@ Each: the question, the answer, why, and what was rejected.
    `=0.3.9`). Plain `gpui` on crates.io is unmaintained. gpui-component supplies the list,
    dialogs, scrollbars and theme plumbing; custom visuals are our own gpui elements.
    Rejected: plain gpui-pre with hand-rolled widgets (too much to build before the useful part).
-2. **dua's role.** Inspiration only, no dependency. dua's library side isn't built to embed,
-   and the GUI wants a tree shaped for it. Rejected: depending on dua or jwalk's tree.
+2. **dua's role.** rsdisk depends on `dua-core` (dua's walking engine, a separate MIT crate
+   since dua 2.45) for the walk only; the tree, size rules and everything above are rsdisk's.
+   Revised 2026-10-18: the first version was "inspiration only", but our own rayon walk with
+   one `lstat` per entry came out 29% slower than dua, and dua-core's macOS bulk-attribute
+   listing is what closes that gap. Rejected: writing our own `getattrlistbulk` parser (a few
+   hundred lines of unsafe buffer parsing plus its edge cases); depending on dua-cli itself.
 3. **Code split.** A Cargo workspace: `rsdisk-core` (scan, tree, sizes, kinds, export,
    deletion logic; no gpui) and `rsdisk` (the app). Core has its own small CLI so it can be
    tested, benchmarked and used to feed the mockup without the GUI. Rejected: one crate with a
@@ -83,16 +87,19 @@ which sits behind a small trait so tests can run without touching the real Trash
 
 ### 3.2 Scan
 
-- Parallel recursive walk on rayon: each directory is a task that reads its entries, stats
-  them with `symlink_metadata`, and spawns child-directory tasks. Symlinks are never followed;
-  they count as their own (tiny) allocated size.
-- Progress: shared atomic counters (files, dirs, bytes) plus a slot holding the most recent
-  path, which the UI polls a few times a second. Cancelling sets an atomic flag that every
-  task checks before reading a directory.
+- `dua_core::walk` does the walking (§2.2): its worker threads list directories with
+  `getattrlistbulk`, which returns names and sizes for a batch of entries in one call, and
+  stream entries to the scanning thread. Its `descend` hook keeps the walk off other volumes
+  and out of skipped folders. Symlinks are never followed; they count as their own (tiny)
+  allocated size.
+- The scanning thread applies the size rules (§3.4), groups entries by the walk's directory
+  ids, and lays them out as the tree (§3.3) when the walk ends.
+- Progress: shared atomic counters (files, dirs, bytes) plus a slot holding a recent path,
+  which the UI polls a few times a second. Cancelling sets an atomic flag; the scanning thread
+  stops consuming and dropping the walk stops its workers.
+- dua-core reports a directory it couldn't open without saying which one. Those are found
+  afterwards by re-opening the entered directories that came back empty.
 - Result: the size tree (§3.3) and the list of errors.
-- If the plain approach misses the speed target (§3.14), the first lever is macOS's
-  `getattrlistbulk`, which returns names and sizes for a whole directory in one call. That's
-  an optimisation behind the same interface, not a v1 requirement.
 
 ### 3.3 Size tree
 

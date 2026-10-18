@@ -28,7 +28,7 @@ Reading it:
   so the kernel's directory and stat calls are the bottleneck. `getattrlistbulk` (§3.2) is
   the lever if this ever needs to get faster.
 
-Cold cache, run by Tim in his own terminal tab (sudo needs a TTY):
+Cold cache (plan 01 walk), run by Tim in his own terminal tab (sudo needs a TTY):
 `hyperfine -N -i --runs 3 --prepare 'sudo -n purge' 'dua aggregate /Users/timvancann' './target/release/rsdisk-core scan /Users/timvancann'`
 
 | Command | Mean | ± σ | Min | Max | Peak memory |
@@ -41,3 +41,19 @@ Cold cache, run by Tim in his own terminal tab (sudo needs a TTY):
 agents were compiling at the time) and the cold table is the more honest one. Its tight
 spread agrees. A quiet warm rerun should confirm. The doubled system time (about 170 s
 against dua's 77 s) is where the gap lives; see the follow-up in plan 01.
+
+## 2026-10-18, walk on dua-core (plan 01 task 7)
+
+Same machine, warm cache, quiet, `hyperfine -N -i --warmup 1 --runs 5`. rsdisk uses all 18
+cores; dua runs with 8 threads (its configured default here).
+
+| Folder | dua | rsdisk-core | Difference | rsdisk peak memory |
+|---|---|---|---|---|
+| `~/repos` (1.15M files) | 3.71 s ± 0.40 | 2.75 s ± 0.21 | 26% faster | 210 MiB |
+| `~` (3.9M files) | 14.30 s ± 0.74 | 15.17 s ± 0.69 | 6% slower | 583 MiB |
+
+Totals match dua to the rounding (86.4 GB on `~/repos`). Phase timings for one `~` scan: the
+walk finishes at 13.0 s (faster than dua), building the tree takes 0.1 s, and finding which
+489 directories couldn't be opened takes 1.7 s. dua-core's error doesn't carry the path, so
+rsdisk re-opens the 12.5k entered-but-empty directories; the cost is the privacy (TCC)
+denials, which are slow every time, not the number of directories.

@@ -106,7 +106,15 @@ need `sudo purge`, so leave that command for Tim and note it in the doc.
 **Outcome:** memory met (730 MiB). Speed missed: cold cache 17.2 s against dua's 13.3 s
 (+29%), with about twice dua's system time. See `docs/benchmarks.md`.
 
-### Task 7: Close the speed gap (not started)
+### Task 7: Close the speed gap
+
+**Outcome:** single-threaded runs were 1.6x slower than dua too, so the cost was per call,
+not parallelism (and std already stats relative to the open directory on macOS). dua lists
+with `getattrlistbulk` through its `dua-core` crate; with Tim's OK the walk now uses it
+(spec §2.2, §3.2). Rayon stays only for re-probing unreadable directories. On `~/repos` the
+scan went from 58% slower than dua to 26% faster. On `~` the walk itself beats dua, but the
+probe for which directories failed costs about 1.7 s, because each one is a macOS privacy
+(TCC) denial and those are slow to repeat. See `docs/benchmarks.md`.
 
 **Approach:** measure before changing anything. Profile a warm scan (`samply` or Instruments)
 to see whether the extra system time is the stat calls themselves (full-path `lstat` per

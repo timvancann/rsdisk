@@ -1,17 +1,18 @@
-//! The parallel walk (spec §3.2). Each directory is a rayon task that lists and stats its
-//! entries, then descends into its subdirectories in parallel. The nested result is flattened
-//! into a `Tree` afterwards, on one thread.
+//! The parallel walk (spec §3.2). dua-core does the walking: its workers list directories in
+//! parallel with macOS's bulk attribute call and hand entries to this thread, which applies
+//! rsdisk's size rules and groups them by directory. The groups become a `Tree` at the end.
 
 use crate::kind::{Kind, kind_of};
 use crate::tree::{Node, NodeId, Tree, TreeBuilder, flag};
+use dua_core::{Entry, Order};
 use rayon::prelude::*;
 use std::collections::HashSet;
-use std::fs::{self, Metadata};
+use std::fs;
 use std::os::unix::fs::MetadataExt;
 use std::path::{Path, PathBuf};
-use std::sync::Mutex;
 use std::sync::atomic::{AtomicBool, AtomicU64, Ordering::Relaxed};
-use std::time::{Duration, Instant};
+use std::sync::{Arc, Mutex};
+use std::time::{Duration, Instant, UNIX_EPOCH};
 
 /// Folders that appear in the tree but are not descended into (spec §2.8).
 #[derive(Debug, Clone, Default)]
@@ -42,7 +43,7 @@ pub struct Progress {
 }
 
 impl Progress {
-    /// The directory most recently entered.
+    /// A directory the scan recently passed through.
     pub fn latest(&self) -> PathBuf {
         self.latest.lock().map(|p| p.clone()).unwrap_or_default()
     }
@@ -70,209 +71,233 @@ pub struct ScanResult {
     pub cancelled: bool,
 }
 
-/// One listed entry, with its subtree when it is a directory that was entered.
-struct Entry {
-    node: Node,
-    children: Vec<Entry>,
-}
-
-struct Ctx<'a> {
-    root_dev: u64,
-    opts: &'a ScanOptions,
-    progress: &'a Progress,
-    seen_inodes: Mutex<HashSet<(u64, u64)>>,
-    errors: Mutex<Vec<ScanError>>,
-}
-
 /// Whether an entry on `dev` lies on another volume than the scan root.
 pub fn crosses_volume(root_dev: u64, dev: u64) -> bool {
     root_dev != dev
 }
 
-/// Allocated bytes, as `du` counts them.
-fn allocated(meta: &Metadata) -> u64 {
-    meta.blocks() * 512
-}
+/// How often (in entries) the consumer refreshes `Progress::latest`.
+const LATEST_EVERY: u64 = 4096;
+
+/// A listed entry waiting for the tree: its node, and its walk directory id when it is a
+/// directory that was entered.
+type Pending = (Node, Option<usize>);
 
 pub fn scan(root: &Path, opts: &ScanOptions, progress: &Progress) -> ScanResult {
     let start = Instant::now();
-    let meta = match fs::symlink_metadata(root) {
+    let root_meta = match fs::symlink_metadata(root) {
         Ok(m) => m,
         Err(e) => {
-            let node = Node::new(
-                root.to_string_lossy(),
-                0,
-                0,
-                Kind::Other,
-                flag::DIR | flag::UNREADABLE,
-            );
-            return ScanResult {
-                tree: TreeBuilder::new(node).finish(),
-                errors: vec![ScanError {
-                    path: root.to_path_buf(),
-                    message: e.to_string(),
-                }],
-                elapsed: start.elapsed(),
-                cancelled: false,
-            };
+            return finish_early(root, flag::DIR | flag::UNREADABLE, Some(e), start, false);
         }
     };
-    let ctx = Ctx {
-        root_dev: meta.dev(),
-        opts,
-        progress,
-        seen_inodes: Mutex::new(HashSet::new()),
-        errors: Mutex::new(Vec::new()),
-    };
-    let mut root_entry = ctx.entry(root.to_string_lossy().into(), &meta);
-    if meta.is_dir() {
-        progress.dirs.fetch_add(1, Relaxed);
-        root_entry.children = ctx.list(root, &mut root_entry.node);
-    } else {
-        progress.files.fetch_add(1, Relaxed);
+    if progress.is_cancelled() {
+        return finish_early(root, flag::DIR, None, start, true);
     }
-    progress.bytes.fetch_add(root_entry.node.size, Relaxed);
 
-    let count = progress.files.load(Relaxed) + progress.dirs.load(Relaxed);
-    let tree = flatten(root_entry, count as usize);
-    let mut errors = ctx.errors.into_inner().unwrap_or_default();
+    let root_dev = root_meta.dev();
+    let skip: Arc<[PathBuf]> = opts.skip.clone().into();
+    let threads = std::thread::available_parallelism().map_or(4, |n| n.get());
+    let descend = move |e: &Entry| {
+        e.depth == 0
+            || (matches!(&e.metadata, Some(Ok(m)) if !crosses_volume(root_dev, m.dev()))
+                && !skip.contains(&e.path()))
+    };
+    let walk = dua_core::walk(
+        root,
+        threads,
+        Order::Completion,
+        Default::default(),
+        descend,
+    );
+
+    let mut root_node = None;
+    // Children by the walk's directory id of their parent.
+    let mut pending: Vec<Vec<Pending>> = Vec::new();
+    let mut errors = Vec::new();
+    let mut open_failures = 0usize;
+    let mut seen_inodes: HashSet<(u64, u64)> = HashSet::new();
+    let mut count = 0u64;
+
+    for item in walk {
+        if progress.is_cancelled() {
+            break;
+        }
+        let entry = match item {
+            Ok(e) => e,
+            // A directory that couldn't be opened; dua-core doesn't say which (see `locate`).
+            Err(_) => {
+                open_failures += 1;
+                continue;
+            }
+        };
+        count += 1;
+        if count.is_multiple_of(LATEST_EVERY)
+            && let Ok(mut latest) = progress.latest.try_lock()
+        {
+            latest.as_mut_os_string().clear();
+            latest.push(&*entry.parent_path);
+        }
+
+        let is_root = entry.depth == 0;
+        let name: Box<str> = if is_root {
+            root.to_string_lossy().into()
+        } else {
+            entry.file_name.to_string_lossy().into()
+        };
+        let mut node = node_for(name, &entry, root_dev, &mut seen_inodes);
+        if let Some(Err(e)) = &entry.metadata {
+            errors.push(ScanError {
+                path: entry.path(),
+                message: e.to_string(),
+            });
+        }
+        if node.is_dir() {
+            progress.dirs.fetch_add(1, Relaxed);
+        } else {
+            progress.files.fetch_add(1, Relaxed);
+        }
+        progress.bytes.fetch_add(node.size, Relaxed);
+
+        if node.is_dir() && !is_root && opts.skip.contains(&entry.path()) {
+            node.flags |= flag::NOT_SCANNED;
+        }
+        let not_entered = flag::OTHER_VOLUME | flag::UNREADABLE | flag::NOT_SCANNED;
+        let entered = entry
+            .directory_id
+            .filter(|_| node.is_dir() && !node.has(not_entered))
+            .map(|d| d.index());
+
+        match entry.parent_directory_id {
+            None => root_node = Some((node, entered)),
+            Some(parent) => {
+                let p = parent.index();
+                if pending.len() <= p {
+                    pending.resize_with(p + 1, Vec::new);
+                }
+                pending[p].push((node, entered));
+            }
+        }
+    }
+
+    let cancelled = progress.is_cancelled();
+    let Some(root_node) = root_node else {
+        return finish_early(root, flag::DIR, None, start, cancelled);
+    };
+    let mut tree_nodes = build(root_node, pending, count as usize);
+    if open_failures > 0 {
+        locate(&mut tree_nodes, &mut errors);
+    }
+    let tree = tree_nodes.finish();
     errors.sort_by(|a, b| a.path.cmp(&b.path));
     ScanResult {
         tree,
         errors,
         elapsed: start.elapsed(),
-        cancelled: progress.is_cancelled(),
+        cancelled,
     }
 }
 
-impl Ctx<'_> {
-    fn error(&self, path: &Path, e: impl ToString) {
-        if let Ok(mut errors) = self.errors.lock() {
-            errors.push(ScanError {
-                path: path.to_path_buf(),
-                message: e.to_string(),
-            });
-        }
+/// A node for one entry, without its children. Hardlinked files count once; a directory on
+/// another volume counts as nothing.
+fn node_for(name: Box<str>, entry: &Entry, root_dev: u64, seen: &mut HashSet<(u64, u64)>) -> Node {
+    let ft = entry.file_type;
+    let mut flags = 0;
+    if ft.is_dir() {
+        flags |= flag::DIR;
     }
-
-    /// A node for one entry, without its children. Hardlinked files count once; a directory
-    /// on another volume counts as nothing and is flagged so it isn't entered.
-    fn entry(&self, name: Box<str>, meta: &Metadata) -> Entry {
-        let ft = meta.file_type();
-        let mut flags = 0;
-        let mut size = allocated(meta);
-        let kind = if ft.is_dir() {
-            flags |= flag::DIR;
-            if crosses_volume(self.root_dev, meta.dev()) {
-                flags |= flag::OTHER_VOLUME;
-                size = 0;
-            }
-            if kind_of(&name) == Kind::App {
-                Kind::App
-            } else {
-                Kind::Other
-            }
-        } else {
-            if ft.is_symlink() {
-                flags |= flag::SYMLINK;
-            }
-            if meta.nlink() > 1
-                && let Ok(mut seen) = self.seen_inodes.lock()
-                && !seen.insert((meta.dev(), meta.ino()))
-            {
-                size = 0;
-            }
-            kind_of(&name)
-        };
-        Entry {
-            node: Node::new(name, size, meta.mtime(), kind, flags),
-            children: Vec::new(),
-        }
+    if ft.is_symlink() {
+        flags |= flag::SYMLINK;
     }
-
-    /// Lists `dir` and recurses into its subdirectories in parallel. Marks `node` unreadable
-    /// when the listing fails.
-    fn list(&self, dir: &Path, node: &mut Node) -> Vec<Entry> {
-        if self.progress.is_cancelled() {
-            return Vec::new();
+    let kind = match kind_of(&name) {
+        Kind::App => Kind::App,
+        _ if ft.is_dir() => Kind::Other,
+        k => k,
+    };
+    let Some(Ok(meta)) = &entry.metadata else {
+        if ft.is_dir() {
+            flags |= flag::UNREADABLE;
         }
-        if let Ok(mut latest) = self.progress.latest.try_lock() {
-            latest.as_mut_os_string().clear();
-            latest.push(dir);
-        }
-        let read = match fs::read_dir(dir) {
-            Ok(r) => r,
-            Err(e) => {
-                node.flags |= flag::UNREADABLE;
-                self.error(dir, e);
-                return Vec::new();
-            }
-        };
-        let mut entries: Vec<Entry> = Vec::new();
-        let (mut files, mut dirs, mut bytes) = (0, 0, 0);
-        for item in read {
-            let item = match item {
-                Ok(i) => i,
-                Err(e) => {
-                    self.error(dir, e);
-                    continue;
-                }
-            };
-            // `DirEntry::metadata` does not follow symlinks.
-            let meta = match item.metadata() {
-                Ok(m) => m,
-                Err(e) => {
-                    self.error(&item.path(), e);
-                    continue;
-                }
-            };
-            let entry = self.entry(item.file_name().to_string_lossy().into(), &meta);
-            if entry.node.is_dir() {
-                dirs += 1;
-            } else {
-                files += 1;
-            }
-            bytes += entry.node.size;
-            entries.push(entry);
-        }
-        self.progress.files.fetch_add(files, Relaxed);
-        self.progress.dirs.fetch_add(dirs, Relaxed);
-        self.progress.bytes.fetch_add(bytes, Relaxed);
-        entries.shrink_to_fit();
-
-        entries
-            .par_iter_mut()
-            .filter(|e| e.node.is_dir() && !e.node.has(flag::OTHER_VOLUME))
-            .for_each(|e| {
-                let path = dir.join(&*e.node.name);
-                if self.opts.skip.contains(&path) {
-                    e.node.flags |= flag::NOT_SCANNED;
-                } else {
-                    e.children = self.list(&path, &mut e.node);
-                }
-            });
-        entries
+        return Node::new(name, 0, 0, kind, flags);
+    };
+    let mut size = meta.allocated_size();
+    if ft.is_dir() && crosses_volume(root_dev, meta.dev()) {
+        flags |= flag::OTHER_VOLUME;
+        size = 0;
+    } else if !ft.is_dir() && meta.nlink() > 1 && !seen.insert((meta.dev(), meta.ino())) {
+        size = 0;
     }
+    let mtime = meta
+        .modified()
+        .ok()
+        .and_then(|t| t.duration_since(UNIX_EPOCH).ok())
+        .map_or(0, |d| d.as_secs() as i64);
+    Node::new(name, size, mtime, kind, flags)
 }
 
-/// `count` is the number of nodes, so the arena is allocated once instead of doubling.
-fn flatten(root: Entry, count: usize) -> Tree {
-    let mut builder = TreeBuilder::with_capacity(root.node, count);
-    let mut stack: Vec<(NodeId, Vec<Entry>)> = vec![(0, root.children)];
-    while let Some((parent, children)) = stack.pop() {
-        let mut grandchildren = Vec::new();
+/// Lays the grouped entries out as a tree, each directory's children added in one go.
+fn build(root: Pending, mut pending: Vec<Vec<Pending>>, count: usize) -> TreeBuilder {
+    let (root_node, root_dir) = root;
+    let mut builder = TreeBuilder::with_capacity(root_node, count.max(1));
+    let mut stack: Vec<(NodeId, usize)> = root_dir.map(|d| (0, d)).into_iter().collect();
+    while let Some((parent, dir)) = stack.pop() {
+        let children = pending.get_mut(dir).map(std::mem::take).unwrap_or_default();
+        if children.is_empty() {
+            continue;
+        }
+        let mut subdirs = Vec::new();
         let first = builder.add_children(
             parent,
-            children.into_iter().enumerate().map(|(i, child)| {
-                if !child.children.is_empty() {
-                    grandchildren.push((i as NodeId, child.children));
+            children.into_iter().enumerate().map(|(i, (node, d))| {
+                if let Some(d) = d {
+                    subdirs.push((i as NodeId, d));
                 }
-                child.node
+                node
             }),
         );
-        stack.extend(grandchildren.into_iter().map(|(i, g)| (first + i, g)));
+        stack.extend(subdirs.into_iter().map(|(i, d)| (first + i, d)));
     }
-    builder.finish()
+    builder
+}
+
+/// Finds the directories dua-core couldn't open. Its error carries no path, so look among the
+/// entered directories that came back empty and try opening each again.
+fn locate(builder: &mut TreeBuilder, errors: &mut Vec<ScanError>) {
+    let not_entered = flag::OTHER_VOLUME | flag::UNREADABLE | flag::NOT_SCANNED;
+    let failed: Vec<(NodeId, PathBuf, String)> = builder
+        .childless_dirs(not_entered)
+        .into_par_iter()
+        .filter_map(|(id, path)| match fs::read_dir(&path) {
+            Ok(_) => None,
+            Err(e) => Some((id, path, e.to_string())),
+        })
+        .collect();
+    for (id, path, message) in failed {
+        builder.node_mut(id).flags |= flag::UNREADABLE;
+        errors.push(ScanError { path, message });
+    }
+}
+
+fn finish_early(
+    root: &Path,
+    flags: u8,
+    error: Option<std::io::Error>,
+    start: Instant,
+    cancelled: bool,
+) -> ScanResult {
+    let node = Node::new(root.to_string_lossy(), 0, 0, Kind::Other, flags);
+    ScanResult {
+        tree: TreeBuilder::new(node).finish(),
+        errors: error
+            .map(|e| ScanError {
+                path: root.to_path_buf(),
+                message: e.to_string(),
+            })
+            .into_iter()
+            .collect(),
+        elapsed: start.elapsed(),
+        cancelled,
+    }
 }
 
 #[cfg(test)]
@@ -384,6 +409,18 @@ mod tests {
     }
 
     #[test]
+    fn empty_folders_are_not_mistaken_for_unreadable_ones() {
+        let t = sample();
+        let locked = t.path().join("locked");
+        fs::create_dir_all(&locked).unwrap();
+        fs::set_permissions(&locked, fs::Permissions::from_mode(0o000)).unwrap();
+        let (r, _) = run(t.path(), &ScanOptions::default());
+        fs::set_permissions(&locked, fs::Permissions::from_mode(0o755)).unwrap();
+        let empty = find(&r.tree, &t.path().join("empty")).unwrap();
+        assert!(!r.tree.node(empty).has(flag::UNREADABLE));
+    }
+
+    #[test]
     fn skipped_folder_is_present_but_not_scanned() {
         let t = sample();
         let cloud = t.path().join("Library/CloudStorage");
@@ -427,7 +464,7 @@ mod tests {
     }
 
     // Crossing into another volume can't be staged in a temp dir, so the check itself is
-    // tested here and the walker's use of it is covered by reading `list`.
+    // tested here and the walker's use of it is covered by reading `scan`.
     #[test]
     fn volume_crossing_is_a_device_change() {
         assert!(!crosses_volume(16777230, 16777230));
