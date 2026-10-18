@@ -5,6 +5,10 @@ use crate::tree::{NodeId, Tree, flag};
 use serde::Serialize;
 use std::collections::HashSet;
 
+/// How many of the largest files and folders an export keeps (spec §3.7).
+pub const FILES: usize = 100;
+pub const DIRS: usize = 100;
+
 #[derive(Debug, Serialize)]
 pub struct ExportNode {
     pub name: String,
