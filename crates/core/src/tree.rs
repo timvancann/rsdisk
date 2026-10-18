@@ -248,6 +248,10 @@ mod tests {
 
     #[test]
     fn nodes_stay_small() {
-        assert!(std::mem::size_of::<Node>() < 100, "{}", std::mem::size_of::<Node>());
+        assert!(
+            std::mem::size_of::<Node>() < 100,
+            "{}",
+            std::mem::size_of::<Node>()
+        );
     }
 }

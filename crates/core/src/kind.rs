@@ -51,26 +51,22 @@ pub fn kind_of(name: &str) -> Kind {
     }
     let ext = ext.to_ascii_lowercase();
     match ext.as_str() {
-        "mp4" | "mov" | "mkv" | "avi" | "m4v" | "webm" | "wmv" | "flv" | "mpg" | "mpeg"
-        | "mts" | "m2ts" | "3gp" => Kind::Video,
+        "mp4" | "mov" | "mkv" | "avi" | "m4v" | "webm" | "wmv" | "flv" | "mpg" | "mpeg" | "mts"
+        | "m2ts" | "3gp" => Kind::Video,
         "mp3" | "m4a" | "aac" | "flac" | "wav" | "aif" | "aiff" | "ogg" | "opus" | "wma"
         | "alac" | "caf" | "mid" | "midi" => Kind::Audio,
         "jpg" | "jpeg" | "png" | "gif" | "heic" | "heif" | "webp" | "tif" | "tiff" | "bmp"
         | "raw" | "cr2" | "cr3" | "nef" | "arw" | "dng" | "psd" | "svg" | "ico" | "icns"
         | "avif" => Kind::Image,
         "zip" | "tar" | "gz" | "tgz" | "bz2" | "xz" | "zst" | "7z" | "rar" | "dmg" | "iso"
-        | "pkg" | "img" | "sparseimage" | "sparsebundle" | "xip" | "jar" | "whl" => {
-            Kind::Archive
-        }
-        "pdf" | "doc" | "docx" | "xls" | "xlsx" | "ppt" | "pptx" | "pages" | "numbers"
-        | "key" | "odt" | "ods" | "odp" | "rtf" | "txt" | "md" | "csv" | "epub" | "log" => {
-            Kind::Document
-        }
+        | "pkg" | "img" | "sparseimage" | "sparsebundle" | "xip" | "jar" | "whl" => Kind::Archive,
+        "pdf" | "doc" | "docx" | "xls" | "xlsx" | "ppt" | "pptx" | "pages" | "numbers" | "key"
+        | "odt" | "ods" | "odp" | "rtf" | "txt" | "md" | "csv" | "epub" | "log" => Kind::Document,
         "rs" | "c" | "h" | "cc" | "cpp" | "hpp" | "m" | "mm" | "swift" | "go" | "py" | "pyc"
-        | "js" | "mjs" | "cjs" | "ts" | "tsx" | "jsx" | "java" | "class" | "kt" | "rb"
-        | "php" | "cs" | "json" | "toml" | "yaml" | "yml" | "xml" | "html" | "css" | "scss"
-        | "svelte" | "vue" | "sh" | "zsh" | "lua" | "sql" | "o" | "a" | "rlib" | "rmeta"
-        | "d" | "map" | "wasm" | "lock" => Kind::Code,
+        | "js" | "mjs" | "cjs" | "ts" | "tsx" | "jsx" | "java" | "class" | "kt" | "rb" | "php"
+        | "cs" | "json" | "toml" | "yaml" | "yml" | "xml" | "html" | "css" | "scss" | "svelte"
+        | "vue" | "sh" | "zsh" | "lua" | "sql" | "o" | "a" | "rlib" | "rmeta" | "d" | "map"
+        | "wasm" | "lock" => Kind::Code,
         "app" | "dylib" | "so" | "framework" | "bundle" | "kext" | "appex" | "exe" | "dll" => {
             Kind::App
         }
