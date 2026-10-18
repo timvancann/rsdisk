@@ -19,6 +19,8 @@ const HELP: &[(&str, &str)] = &[
     ("s", "sort by size, name, files"),
     ("Space", "mark / unmark, then down"),
     ("u", "clear marks"),
+    ("/", "search the whole scan"),
+    ("n / N", "next / previous search result"),
     ("d", "review marked and move to the Trash"),
     ("v", "treemap / sunburst"),
     ("a", "colour by kind / age"),
@@ -73,6 +75,7 @@ impl RsDisk {
                 )
             })
             .when(self.help, |d| d.child(self.render_help()))
+            .children(self.render_find())
             .children(self.render_dialog())
     }
 

@@ -3,6 +3,7 @@
 
 use crate::browser::Browser;
 use crate::cleanup::Dialog;
+use crate::find::Find;
 use crate::keys::{Action, Keymap};
 use crate::marks::Marks;
 use crate::settings::{ColourMode, Settings, Visual};
@@ -45,6 +46,9 @@ pub struct RsDisk {
     pub(crate) hover: Option<Hover>,
     pub(crate) marks: Marks,
     pub(crate) dialog: Option<Dialog>,
+    pub(crate) find: Option<Find>,
+    /// The last search's results and where `n`/`N` are in them.
+    pub(crate) last_found: (Vec<NodeId>, usize),
     themes: Vec<Theme>,
     keymap: Keymap,
     focus: FocusHandle,
@@ -100,6 +104,8 @@ impl RsDisk {
             hover: None,
             marks: Marks::default(),
             dialog: None,
+            find: None,
+            last_found: (Vec::new(), 0),
             keymap: Keymap::default(),
             focus,
             located: None,
@@ -206,7 +212,8 @@ impl RsDisk {
             (Some(c), false) => c.as_str(),
             _ => k.key.as_str(),
         };
-        if self.dialog_key(key) {
+        if self.dialog_key(key) || self.find_key(&k.key, k.key_char.as_deref(), k.modifiers.control)
+        {
             cx.notify();
             return;
         }
@@ -255,6 +262,9 @@ impl RsDisk {
             Action::ToggleMark => self.toggle_mark(),
             Action::UnmarkAll => self.marks.clear(),
             Action::Trash => self.open_confirm(),
+            Action::Search => self.open_find(),
+            Action::NextMatch => self.step_found(true),
+            Action::PrevMatch => self.step_found(false),
             _ => {}
         }
         let rows = Self::visible_rows(window);
@@ -275,7 +285,12 @@ impl RsDisk {
                     Action::Open => b.open(),
                     Action::Back => b.back(),
                     Action::CycleSort => b.cycle_sort(),
-                    Action::ToggleMark | Action::UnmarkAll | Action::Trash => {}
+                    Action::ToggleMark
+                    | Action::UnmarkAll
+                    | Action::Trash
+                    | Action::Search
+                    | Action::NextMatch
+                    | Action::PrevMatch => {}
                     Action::Help => self.help = true,
                     Action::Reveal => {
                         if let Some(s) = b.selected() {
