@@ -49,9 +49,12 @@ Each: the question, the answer, why, and what was rejected.
    Walking them can trigger network fetches and is slow. Rejected: scanning them like any folder.
 9. **Unreadable folders.** Marked in the tree as unknown size and counted ("N folders couldn't
    be read", with a list). Rejected: skipping silently.
-10. **Visualization.** A sorted list is the backbone (it carries the keyboard navigation). The
-    visual beside it is chosen after an HTML mockup on real scan data compares treemap,
-    sunburst and icicle (§3.7). Treemap colour shows file kind by default, age as a second mode.
+10. **Visualization.** A sorted list is the backbone (it carries the keyboard navigation).
+    Beside it, one visual pane that switches between a treemap and a sunburst with `v`,
+    remembered in settings. Chosen by Tim on 2026-10-18 after the HTML mockup (§3.7) showed
+    all three on his own home folder: both treemap and sunburst were useful. Colour shows file
+    kind by default, age as a second mode. Rejected: the icicle; showing two visuals at once
+    (too cramped next to the list on a laptop screen).
 11. **Deletion.** Trash only, through `NSFileManager` so Finder's "Put Back" works. Mark
     several items, review them with their total, confirm once. The scan root can't be trashed.
     After trashing, the tree drops the items and subtracts their sizes upward; no rescan.
@@ -159,9 +162,14 @@ Exported JSON holds personal paths and is gitignored.
 
 ### 3.8 Window layout
 
-The list sits on the left and the chosen visual on the right, with list selection and visual
-selection always in sync. Above them: breadcrumb of the current folder and the scan totals.
-The marked-items panel and the visual's exact form are decided after the mockup (§4).
+- The list sits on the left and the visual pane (treemap or sunburst, §2.10) on the right.
+  Above them: the breadcrumb of the current folder and the scan totals.
+- The visual always shows the folder the list is in. Opening or leaving a folder in either
+  moves both, and the selected item is highlighted in both.
+- The visual draws down until cells would be a few pixels small and merges what's left in a
+  folder into one neutral "(other)" cell, as the mockup does.
+- Marked items get their own pane along the bottom, shown only while anything is marked:
+  "N items, X GB", with `d` to review and trash and `u` to clear.
 
 ### 3.9 Keys and mouse
 
@@ -173,6 +181,7 @@ Starting set, refined during the GUI plans:
 - `/` search, `n`/`N` next/previous match.
 - `s` cycle sort (size, name, count), `r` rescan the current folder, `c` scan a not-scanned
   cloud folder.
+- `v` switch the visual (treemap, sunburst), `a` switch colour (kind, age).
 - `o` reveal in Finder, `?` help, `q` quit.
 - Mouse: click selects, double-click opens, clicking a cell in the visual selects that item.
 
@@ -198,7 +207,8 @@ Results list ranked by match score, then size. Picking one opens its parent and 
 - Roles are pushed into gpui-component's theme colours so its widgets match.
 - The eight file-kind colours are the theme's terminal ANSI colours, with a fixed fallback.
 - Settings live in `~/Library/Application Support/rsdisk/settings.json`: the light theme
-  name and the dark theme name. The window follows the system appearance.
+  name, the dark theme name, and the last visual and colour mode. The window follows the
+  system appearance.
 
 ### 3.13 Running and permissions
 
@@ -224,9 +234,10 @@ Results list ranked by match score, then size. Picking one opens its parent and 
 - Gate before every commit: `cargo test --workspace && cargo clippy --workspace -- -D warnings
   && cargo build --release`.
 
-## 4. Deferred until the mockup
+## 4. GUI plan sequence
 
-Decided after plan 02, at the start of plan 03:
-
-- Which visual (treemap, sunburst, icicle) goes in the app, and whether more than one.
-- The marked-items panel's placement in §3.8.
+- Plan 03, app shell: window, scan with live progress, the list with vim keys, breadcrumb,
+  Zed themes, settings, and finding unreadable folders in the background.
+- Plan 04, visuals: treemap and sunburst as custom gpui elements, in sync with the list.
+- Plan 05, cleanup: marks and their pane, the confirm dialog, Trash, search, rescanning a
+  folder (`r`) and scanning a cloud folder on demand (`c`).
