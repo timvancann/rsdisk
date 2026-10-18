@@ -55,10 +55,13 @@ Each: the question, the answer, why, and what was rejected.
     all three on his own home folder: both treemap and sunburst were useful. Colour shows file
     kind by default, age as a second mode. Rejected: the icicle; showing two visuals at once
     (too cramped next to the list on a laptop screen).
-11. **Deletion.** Trash only, through `NSFileManager` so Finder's "Put Back" works. Mark
-    several items, review them with their total, confirm once. The scan root can't be trashed.
-    After trashing, the tree drops the items and subtracts their sizes upward; no rescan.
-    Rejected: permanent delete, single-item immediate delete.
+11. **Deletion.** Trash only, through Finder so "Put Back" works. Mark several items, review
+    them with their total, confirm once. The scan root can't be trashed. After trashing, the
+    tree drops the items and subtracts their sizes upward; no rescan. Revised 2026-10-18: the
+    first version said `NSFileManager` keeps "Put Back"; it doesn't (a known macOS bug, noted
+    in the `trash` crate). Finder is slower, plays its sound and asks once for permission to
+    control Finder; Tim chose it for the undo. Rejected: permanent delete, single-item
+    immediate delete, `NSFileManager` (no "Put Back").
 12. **Search.** `/` fuzzy-matches paths across the whole scanned tree and jumps to the result.
     Rejected: filtering only the current folder.
 13. **Running.** v1 is a binary launched from the terminal (`rsdisk [path]`), which borrows the
@@ -189,14 +192,18 @@ Starting set, refined during the GUI plans:
 
 ### 3.10 Search
 
-An in-memory fuzzy match over every node's full path (built from the arena on demand).
-Results list ranked by match score, then size. Picking one opens its parent and selects it.
+An in-memory fuzzy match over every node's name, in parallel, with no path index (full paths
+for 4 million nodes would cost hundreds of MB). A query with `/` in it matches its last part
+against the name and the earlier parts, in order, against the ancestors' names, so
+`lib/cach` finds `~/Library/Caches`. Results list ranked by match score, then size. Picking
+one opens its parent and selects it; `n`/`N` step through the results afterwards.
 
 ### 3.11 Deletion
 
 - Marks are a set of node indices. Marking a folder that contains marked items replaces them.
 - `d` opens a dialog listing marked paths and their total; confirming trashes each one through
-  `NSFileManager trashItemAtURL` (the `trash` crate's macOS backend is acceptable).
+  Finder (the `trash` crate with `DeleteMethod::Finder`), off the main thread since Finder is
+  slow.
 - Each success removes the node and subtracts its size and file count from every ancestor.
   Each failure stays in the tree and is reported in the dialog.
 - The scan root is never markable.
