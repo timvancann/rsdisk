@@ -31,8 +31,12 @@ pub struct Settings {
 }
 
 impl Settings {
-    /// `~/Library/Application Support/rsdisk/settings.json`.
+    /// `~/Library/Application Support/rsdisk/settings.json`, or `$RSDISK_SETTINGS` (used for
+    /// screenshots, so they don't touch Tim's own settings).
     pub fn default_path() -> Option<PathBuf> {
+        if let Some(path) = std::env::var_os("RSDISK_SETTINGS") {
+            return Some(path.into());
+        }
         std::env::home_dir().map(|h| h.join("Library/Application Support/rsdisk/settings.json"))
     }
 

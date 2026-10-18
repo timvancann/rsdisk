@@ -3,15 +3,18 @@
 
 use crate::browser::Browser;
 use crate::keys::{Action, Keymap};
-use crate::settings::Settings;
+use crate::settings::{ColourMode, Settings, Visual};
 use crate::theme::{self, Theme};
+use crate::visual::{Hover, VisualCache};
 use gpui_kit::*;
 use rsdisk_core::scan::{
     Progress, ScanError, ScanOptions, ScanResult, apply_unreadable, probe_unreadable, scan,
     unreadable_candidates,
 };
 use rsdisk_core::tree::NodeId;
+use std::cell::RefCell;
 use std::path::{Path, PathBuf};
+use std::rc::Rc;
 use std::sync::Arc;
 use std::sync::mpsc::{Receiver, TryRecvError, channel};
 use std::time::{Duration, Instant};
@@ -35,8 +38,10 @@ pub struct RsDisk {
     pub theme: Theme,
     pub help: bool,
     pub scroll: UniformListScrollHandle,
+    pub(crate) settings: Settings,
+    pub(crate) visual_cache: Rc<RefCell<VisualCache>>,
+    pub(crate) hover: Option<Hover>,
     themes: Vec<Theme>,
-    settings: Settings,
     keymap: Keymap,
     focus: FocusHandle,
     /// Unreadable folders found after the scan, while that search runs (spec §3.2).
@@ -87,6 +92,8 @@ impl RsDisk {
             scroll: UniformListScrollHandle::new(),
             themes,
             settings,
+            visual_cache: Rc::default(),
+            hover: None,
             keymap: Keymap::default(),
             focus,
             located: None,
@@ -173,6 +180,11 @@ impl RsDisk {
     }
 
     fn key(&mut self, event: &KeyDownEvent, window: &mut Window, cx: &mut Context<Self>) {
+        // A screenshot launch must never act on keys: they belong to whatever Tim is typing
+        // in (one stray `a` switched the colour mode during a screenshot run).
+        if std::env::var_os("RSDISK_NO_FOCUS").is_some() {
+            return;
+        }
         let k = &event.keystroke;
         if k.modifiers.platform {
             if k.key == "q" {
@@ -201,6 +213,29 @@ impl RsDisk {
                 self.help = false;
                 cx.notify();
             }
+            return;
+        }
+        if matches!(action, Action::SwitchVisual | Action::SwitchColour) {
+            let s = &mut self.settings;
+            match action {
+                Action::SwitchVisual => {
+                    s.visual = match s.visual {
+                        Visual::Treemap => Visual::Sunburst,
+                        Visual::Sunburst => Visual::Treemap,
+                    };
+                    self.hover = None;
+                }
+                _ => {
+                    s.colour = match s.colour {
+                        ColourMode::Kind => ColourMode::Age,
+                        ColourMode::Age => ColourMode::Kind,
+                    }
+                }
+            }
+            if let Some(path) = Settings::default_path() {
+                let _ = s.save(&path);
+            }
+            cx.notify();
             return;
         }
         let rows = Self::visible_rows(window);
@@ -239,6 +274,22 @@ impl RsDisk {
             }
         }
         cx.notify();
+    }
+
+    /// Runs `f` on the browser (if browsing), keeps the list scrolled to the selection, and
+    /// redraws.
+    pub fn with_browser(&mut self, cx: &mut Context<Self>, f: impl FnOnce(&mut Browser)) {
+        if let Stage::Browsing(b) = &mut self.stage {
+            let folder = b.folder();
+            f(b);
+            if b.folder() != folder {
+                self.hover = None;
+            }
+            if let Some(i) = b.selected_index() {
+                self.scroll.scroll_to_item(i, ScrollStrategy::Nearest);
+            }
+            cx.notify();
+        }
     }
 
     /// Mouse: select a row, or open it on a double click.

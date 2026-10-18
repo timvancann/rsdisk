@@ -10,3 +10,4 @@ mod scanning;
 pub mod settings;
 pub mod theme;
 pub mod view;
+mod visual;

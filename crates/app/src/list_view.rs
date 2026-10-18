@@ -54,19 +54,7 @@ impl RsDisk {
                             .size_full(),
                         ),
                     )
-                    .child(
-                        div()
-                            .flex_1()
-                            .h_full()
-                            .border_l_1()
-                            .border_color(rgb(t.faint))
-                            .bg(rgb(t.surface))
-                            .flex()
-                            .items_center()
-                            .justify_center()
-                            .text_color(rgb(t.dim))
-                            .child("Treemap and sunburst go here"),
-                    ),
+                    .child(self.render_visual(b, cx)),
             )
             .when(rows == 0, |d| {
                 d.child(
