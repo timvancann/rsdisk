@@ -9,6 +9,7 @@ pub mod keys;
 pub mod layout;
 mod list_view;
 pub mod marks;
+mod quick_look;
 mod rescan;
 mod scanning;
 pub mod search;

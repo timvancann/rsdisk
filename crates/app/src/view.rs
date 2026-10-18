@@ -6,6 +6,7 @@ use crate::cleanup::Dialog;
 use crate::find::Find;
 use crate::keys::{Action, Keymap};
 use crate::marks::Marks;
+use crate::quick_look;
 use crate::rescan::Rescan;
 use crate::settings::{ColourMode, Settings, Visual};
 use crate::theme::{self, Theme};
@@ -51,8 +52,6 @@ pub struct RsDisk {
     /// The last search's results and where `n`/`N` are in them.
     pub(crate) last_found: (Vec<NodeId>, usize),
     pub(crate) rescan: Option<Rescan>,
-    /// The open Quick Look preview (`p`) and what it shows; `p` on the same item closes it.
-    preview: Option<(PathBuf, std::process::Child)>,
     themes: Vec<Theme>,
     keymap: Keymap,
     focus: FocusHandle,
@@ -111,7 +110,6 @@ impl RsDisk {
             find: None,
             last_found: (Vec::new(), 0),
             rescan: None,
-            preview: None,
             keymap: Keymap::default(),
             focus,
             located: None,
@@ -304,25 +302,7 @@ impl RsDisk {
                     Action::Help => self.help = true,
                     Action::Preview => {
                         if let Some(s) = b.selected() {
-                            let path = b.tree().path(s);
-                            // Still showing this item (not closed by hand): `p` closes it.
-                            let same = self.preview.as_mut().is_some_and(|(p, child)| {
-                                *p == path && matches!(child.try_wait(), Ok(None))
-                            });
-                            if let Some((_, mut child)) = self.preview.take() {
-                                let _ = child.kill();
-                                let _ = child.wait();
-                            }
-                            if !same {
-                                self.preview = std::process::Command::new("qlmanage")
-                                    .arg("-p")
-                                    .arg(&path)
-                                    .stdout(std::process::Stdio::null())
-                                    .stderr(std::process::Stdio::null())
-                                    .spawn()
-                                    .ok()
-                                    .map(|child| (path, child));
-                            }
+                            quick_look::toggle(&b.tree().path(s));
                         }
                     }
                     Action::Reveal => {
@@ -390,6 +370,13 @@ impl Render for RsDisk {
             } => self.render_scanning(progress, *started).into_any_element(),
             Stage::Browsing(b) => self.render_browser(b, window, cx).into_any_element(),
         };
+        // Every selection change ends in a render, so this is where the preview follows it.
+        if let Stage::Browsing(b) = &self.stage
+            && let Some(s) = b.selected()
+            && quick_look::is_open()
+        {
+            quick_look::follow(&b.tree().path(s));
+        }
         div()
             .track_focus(&self.focus)
             .on_key_down(cx.listener(Self::key))
