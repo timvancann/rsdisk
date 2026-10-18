@@ -418,25 +418,35 @@ impl RsDisk {
                 )
             }
         };
-        let x: f32 = (hover.at.x - bounds.origin.x).into();
-        let y: f32 = (hover.at.y - bounds.origin.y).into();
-        let w: f32 = bounds.size.width.into();
-        let left = (x + 14.).min(w - 320.).max(0.);
+        // Deferred, so it paints above the legend and the rest of the window; in the lower
+        // half of the pane it opens upwards, away from the window's bottom edge.
+        let lower = hover.at.y > bounds.origin.y + bounds.size.height / 2.;
+        let (corner, offset) = if lower {
+            (Anchor::BottomLeft, point(px(14.), px(-10.)))
+        } else {
+            (Anchor::TopLeft, point(px(14.), px(16.)))
+        };
+        let tip = div()
+            .max_w(px(420.))
+            .px_2()
+            .py_1()
+            .rounded_md()
+            .bg(rgb(t.surface))
+            .border_1()
+            .border_color(rgb(t.faint))
+            .text_size(px(12.))
+            .child(div().font_family("Menlo").child(title))
+            .child(div().text_color(rgb(t.dim)).child(detail));
         Some(
-            div()
-                .absolute()
-                .left(px(left))
-                .top(px(y + 16.))
-                .max_w(px(420.))
-                .px_2()
-                .py_1()
-                .rounded_md()
-                .bg(rgb(t.surface))
-                .border_1()
-                .border_color(rgb(t.faint))
-                .text_size(px(12.))
-                .child(div().font_family("Menlo").child(title))
-                .child(div().text_color(rgb(t.dim)).child(detail)),
+            deferred(
+                anchored()
+                    .anchor(corner)
+                    .position(hover.at)
+                    .offset(offset)
+                    .snap_to_window_with_margin(px(8.))
+                    .child(tip),
+            )
+            .with_priority(1),
         )
     }
 
