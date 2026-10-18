@@ -4,6 +4,7 @@
 pub mod browser;
 pub mod colour;
 pub mod keys;
+pub mod layout;
 mod list_view;
 mod scanning;
 pub mod settings;
