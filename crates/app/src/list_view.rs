@@ -37,6 +37,7 @@ const HELP: &[(&str, &str)] = &[
     ("p", "preview with Quick Look"),
     ("Esc", "stop a rescan, close the preview"),
     ("?", "this help"),
+    ("Cmd-,", "settings and permissions"),
     ("q", "quit"),
 ];
 

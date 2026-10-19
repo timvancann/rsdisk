@@ -55,7 +55,12 @@ pub struct RsDisk {
     /// A one-line answer to the last key, such as why a mark was refused; the next key
     /// clears it.
     pub(crate) note: Option<String>,
-    themes: Vec<Theme>,
+    pub(crate) themes: Vec<Theme>,
+    /// Whether the system appearance is dark, which picks the dark or light theme.
+    pub(crate) dark: bool,
+    /// The settings window while it is open (Cmd-, brings it forward instead of opening a
+    /// second one).
+    pub(crate) settings_window: Option<AnyWindowHandle>,
     keymap: Keymap,
     focus: FocusHandle,
     /// Unreadable folders found after the scan, while that search runs (spec §3.2).
@@ -100,9 +105,11 @@ impl RsDisk {
         })
         .detach();
         let appearance = cx.observe_window_appearance(window, |view, window, cx| {
-            view.theme = Self::theme_for(&view.themes, &view.settings, is_dark(window));
+            view.dark = is_dark(window);
+            view.theme = Self::theme_for(&view.themes, &view.settings, view.dark);
             theme::apply(&view.theme, Some(window), cx);
             cx.notify();
+            cx.refresh_windows();
         });
 
         RsDisk {
@@ -113,6 +120,8 @@ impl RsDisk {
             help: false,
             scroll: UniformListScrollHandle::new(),
             themes,
+            dark: is_dark(window),
+            settings_window: None,
             settings,
             visual_cache: Rc::default(),
             hover: None,
@@ -127,6 +136,24 @@ impl RsDisk {
             located: None,
             _appearance: appearance,
         }
+    }
+
+    /// A change from the settings window (or `v` / `a`): saves the settings and redraws every
+    /// window with them.
+    pub(crate) fn change_settings(
+        &mut self,
+        change: impl FnOnce(&mut Settings),
+        cx: &mut Context<Self>,
+    ) {
+        change(&mut self.settings);
+        if let Some(path) = Settings::default_path() {
+            let _ = self.settings.save(&path);
+        }
+        self.theme = Self::theme_for(&self.themes, &self.settings, self.dark);
+        theme::apply(&self.theme, None, cx);
+        self.hover = None;
+        cx.notify();
+        cx.refresh_windows();
     }
 
     fn theme_for(themes: &[Theme], settings: &Settings, dark: bool) -> Theme {
@@ -271,26 +298,23 @@ impl RsDisk {
             return;
         }
         if matches!(action, Action::SwitchVisual | Action::SwitchColour) {
-            let s = &mut self.settings;
-            match action {
-                Action::SwitchVisual => {
-                    s.visual = match s.visual {
-                        Visual::Treemap => Visual::Sunburst,
-                        Visual::Sunburst => Visual::Treemap,
-                    };
-                    self.hover = None;
-                }
-                _ => {
-                    s.colour = match s.colour {
-                        ColourMode::Kind => ColourMode::Age,
-                        ColourMode::Age => ColourMode::Kind,
+            self.change_settings(
+                |s| match action {
+                    Action::SwitchVisual => {
+                        s.visual = match s.visual {
+                            Visual::Treemap => Visual::Sunburst,
+                            Visual::Sunburst => Visual::Treemap,
+                        }
                     }
-                }
-            }
-            if let Some(path) = Settings::default_path() {
-                let _ = s.save(&path);
-            }
-            cx.notify();
+                    _ => {
+                        s.colour = match s.colour {
+                            ColourMode::Kind => ColourMode::Age,
+                            ColourMode::Age => ColourMode::Kind,
+                        }
+                    }
+                },
+                cx,
+            );
             return;
         }
         match action {

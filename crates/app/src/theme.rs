@@ -24,6 +24,8 @@ pub struct Theme {
     /// Warnings and refusals (Full Disk Access, notes). Never used for data.
     pub warning: u32,
     pub error: u32,
+    /// A granted permission. Never used for data.
+    pub success: u32,
     /// One colour per file kind, in the order of `Kind::ALL`.
     pub kinds: [u32; 8],
 }
@@ -80,6 +82,7 @@ pub fn builtin_dark() -> Theme {
         accent: 0xe5c07b,
         warning: 0xf0a868,
         error: 0xe06c75,
+        success: 0x8cc265,
         kinds: FALLBACK_KINDS,
     }
 }
@@ -98,6 +101,7 @@ pub fn builtin_light() -> Theme {
         accent: 0x8a5f0f,
         warning: 0x8f4f12,
         error: 0xc4453f,
+        success: 0x2f7a32,
         kinds: FALLBACK_KINDS,
     }
 }
@@ -178,6 +182,7 @@ pub fn from_zed(theme: &Value) -> Option<Theme> {
         faint: pick(&["border.variant", "border"], fallback.faint),
         accent: pick(&["text.accent"], fallback.accent),
         warning: pick(&["warning"], fallback.warning),
+        success: pick(&["success"], fallback.success),
         error: pick(&["error"], fallback.error),
         kinds: resolved,
     })

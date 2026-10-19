@@ -241,6 +241,9 @@ one opens its parent and selects it; `n`/`N` step through the results afterwards
 - Settings live in `~/Library/Application Support/rsdisk/settings.json`: the light theme
   name, the dark theme name, and the last visual and colour mode. The window follows the
   system appearance.
+- A settings window (Cmd-, or RSdisk > Settings) sets all four, laid out like macOS System
+  Settings: titled groups of rows, label left, control right. Changes apply and save at
+  once. It also shows the permissions of §3.13.
 
 ### 3.13 Running and permissions
 
@@ -248,6 +251,16 @@ RSdisk.app from the Dock, or `rsdisk [path]` from a terminal (§2.13). When the 
 suggest missing Full Disk Access (any unreadable folder under `~/Library`, `~/Desktop`,
 `~/Documents` or `~/Downloads`), the summary says so and names the setting. Permission
 messages name RSdisk when it runs from its bundle and the terminal otherwise.
+
+The settings window shows both permissions and rechecks them every two seconds, so a change
+made in System Settings shows up without reopening it:
+
+- Full Disk Access: on when the system's permission database (`TCC.db`) can be opened.
+  macOS never asks for it, so the window opens System Settings at Full Disk Access and says
+  what to turn on and that rsdisk must be restarted.
+- Control Finder: read with `AEDeterminePermissionToAutomateTarget`. When macOS hasn't asked
+  yet, "Allow..." makes it show its own prompt; when it was refused, the window opens System
+  Settings at Automation.
 
 ### 3.14 Performance
 
