@@ -106,10 +106,12 @@ which sits behind a small trait so tests can run without touching the real Trash
 - Progress: shared atomic counters (files, dirs, bytes) plus a slot holding a recent path,
   which the UI polls a few times a second. Like dua, there is no separate scan screen: the
   browser's list and visual show the items under the root as they fill in, under a header
-  with the counters, and keys wait for the real tree. The scanning thread adds each entry to
-  the item that holds it (size, files, bytes by kind, age) and publishes those totals every
-  100 ms; the UI turns them into a one-level tree. The walk can deliver a folder's contents
-  before the folder itself, so such entries wait until the chain up to the root is known.
+  with the counters, and keys wait for the real tree. The scanning thread keeps a small tree
+  of the folders down to the sunburst's depth (5) plus the files directly under the root;
+  everything deeper adds its size, kind bytes and age to the folder holding it. It publishes
+  that every 250 ms and the UI rebuilds a `Tree` from it, with the same sizes, kinds and ages
+  the finished tree will have for those folders. The walk can deliver a folder's contents
+  before the folder itself, so such entries wait until that folder is placed.
   Cancelling sets an atomic flag; the scanning thread
   stops consuming and dropping the walk stops its workers.
 - dua-core reports a directory it couldn't open without saying which one. The scan result

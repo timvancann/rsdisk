@@ -32,8 +32,10 @@ pub enum Stage {
         progress: Arc<Progress>,
         started: Instant,
         done: Receiver<ScanResult>,
-        /// The items under the root so far, drawn like the browser (spec §3.2).
+        /// The scan so far, drawn like the browser (spec §3.2), and the
+        /// `Progress::live_version` it was built from.
         so_far: Box<Browser>,
+        so_far_version: u64,
     },
     Browsing(Browser),
 }
@@ -195,6 +197,7 @@ impl RsDisk {
             started: Instant::now(),
             done: rx,
             so_far,
+            so_far_version: 0,
         }
     }
 
@@ -203,12 +206,17 @@ impl RsDisk {
             done,
             progress,
             so_far: shown,
+            so_far_version,
             ..
         } = &mut self.stage
         {
             match done.try_recv() {
                 Ok(result) => self.browse(result),
-                Err(TryRecvError::Empty) => **shown = Browser::so_far(so_far(&self.root, progress)),
+                Err(TryRecvError::Empty) if progress.live_version() != *so_far_version => {
+                    *so_far_version = progress.live_version();
+                    **shown = Browser::so_far(so_far(&self.root, progress));
+                }
+                Err(TryRecvError::Empty) => {}
                 Err(TryRecvError::Disconnected) => return,
             }
             cx.notify();

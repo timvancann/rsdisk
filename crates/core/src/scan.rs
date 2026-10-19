@@ -3,6 +3,7 @@
 //! rsdisk's size rules and groups them by directory. The groups become a `Tree` at the end.
 
 use crate::kind::{Kind, kind_of};
+use crate::live::{self, Live, LiveNode};
 use crate::tree::{Node, NodeId, Tree, TreeBuilder, flag};
 use dua_core::{Entry, Order};
 use rayon::prelude::*;
@@ -39,107 +40,33 @@ pub struct Progress {
     pub dirs: AtomicU64,
     pub bytes: AtomicU64,
     latest: Mutex<PathBuf>,
-    tops: Mutex<Vec<Top>>,
+    /// The scan so far (`live::DEPTH` levels), published every `LIVE_EVERY`.
+    live: Mutex<Vec<LiveNode>>,
+    live_version: AtomicU64,
     cancel: AtomicBool,
 }
 
-/// Running totals for one item directly under the scan root, so the window can show where
-/// the space is while the walk runs, as dua does.
-#[derive(Debug, Clone, PartialEq, Eq)]
-pub struct Top {
-    pub name: Box<str>,
-    pub dir: bool,
-    pub sum: Sum,
-}
-
-/// What a set of entries adds up to: what `Tree::summarize` would work out from them.
-#[derive(Debug, Clone, Copy, Default, PartialEq, Eq)]
-pub struct Sum {
-    pub bytes: u64,
-    pub files: u64,
-    /// File bytes by `Kind as usize`.
-    pub kinds: [u64; 8],
-    /// Modified time times size over the dated files, and their size.
-    pub dated: u128,
-    pub weight: u64,
-}
-
-impl Sum {
-    fn of(node: &Node) -> Sum {
-        let mut sum = Sum {
-            bytes: node.size,
-            ..Sum::default()
-        };
-        if !node.is_dir() {
-            sum.files = 1;
-            sum.kinds[node.kind as usize] = node.size;
-            if node.mtime > 0 {
-                sum.dated = node.mtime as u128 * node.size as u128;
-                sum.weight = node.size;
-            }
-        }
-        sum
-    }
-
-    fn add(&mut self, other: &Sum) {
-        self.bytes += other.bytes;
-        self.files += other.files;
-        for (a, b) in self.kinds.iter_mut().zip(other.kinds) {
-            *a += b;
-        }
-        self.dated += other.dated;
-        self.weight += other.weight;
-    }
-}
-
 impl Progress {
-    /// The items under the root so far, in the order the walk met them.
-    pub fn tops(&self) -> Vec<Top> {
-        self.tops.lock().map(|t| t.clone()).unwrap_or_default()
+    /// Goes up each time the scan so far changes, so the UI rebuilds it only then.
+    pub fn live_version(&self) -> u64 {
+        self.live_version.load(Relaxed)
     }
 
-    /// The scan so far as a tree one level deep, for the window to show while the walk runs.
-    /// Folders get the kind and age their contents so far give them.
+    /// The scan so far as a tree a few levels deep, for the window to show while the walk
+    /// runs. Its folders have the sizes, kinds and ages of what the walk has found in them.
     pub fn tree_so_far(&self, root: &Path) -> Tree {
-        let tops = self.tops();
-        let root_node = Node::new(root.to_string_lossy(), 0, 0, Kind::Other, flag::DIR);
-        let mut builder = TreeBuilder::with_capacity(root_node, tops.len() + 1);
-        builder.add_children(
-            0,
-            tops.iter().map(|t| {
-                let flags = if t.dir { flag::DIR } else { 0 };
-                let mut n = Node::new(t.name.clone(), t.sum.bytes, 0, Kind::Other, flags);
-                n.files = t.sum.files as u32;
-                n
-            }),
-        );
-        let mut tree = builder.finish();
-        // `finish` rolled sizes up but found no files to colour by; give each item its own.
-        let by_name: std::collections::HashMap<&str, &Sum> =
-            tops.iter().map(|t| (&*t.name, &t.sum)).collect();
-        let children = tree.children(tree.root()).to_vec();
-        for id in children {
-            let n = tree.node_mut(id);
-            let Some(sum) = by_name.get(&*n.name) else {
-                continue;
-            };
-            let (best, bytes) =
-                sum.kinds.iter().enumerate().fold(
-                    (7, 0),
-                    |best, (k, b)| {
-                        if *b > best.1 { (k, *b) } else { best }
-                    },
-                );
-            n.kind = if kind_of(&n.name) == Kind::App {
-                Kind::App
-            } else if bytes == 0 {
-                Kind::Other
-            } else {
-                Kind::ALL[best]
-            };
-            n.mtime = (sum.dated / sum.weight.max(1) as u128) as u32;
+        let nodes = self.live.lock().map(|n| n.clone()).unwrap_or_default();
+        if nodes.is_empty() {
+            return TreeBuilder::new(Node::new(
+                root.to_string_lossy(),
+                0,
+                0,
+                Kind::Other,
+                flag::DIR,
+            ))
+            .finish();
         }
-        tree
+        live::tree(&nodes, root)
     }
 
     /// A directory the scan recently passed through.
@@ -188,96 +115,17 @@ pub fn crosses_volume(root_dev: u64, dev: u64) -> bool {
 /// How often (in entries) the consumer refreshes `Progress::latest`.
 const LATEST_EVERY: u64 = 4096;
 
-/// How often the consumer publishes `Progress::tops`.
-const TOPS_EVERY: Duration = Duration::from_millis(100);
+/// How often the consumer publishes the scan so far (`Progress::tree_so_far`).
+const LIVE_EVERY: Duration = Duration::from_millis(250);
 
 /// A listed entry waiting for the tree: its node, and its walk directory id when it is a
 /// directory that was entered.
 type Pending = (Node, Option<usize>);
 
-/// Adds each entry to the item under the root that holds it. The walk can hand over a
-/// folder's contents before the folder itself, so entries whose item isn't known yet wait,
-/// and `settle` places them once the chain up to the root has arrived.
-#[derive(Default)]
-struct Tops {
-    items: Vec<Top>,
-    /// By walk directory id: the item it belongs to, and its parent's directory id.
-    top_of: Vec<Option<usize>>,
-    parent_of: Vec<Option<usize>>,
-    /// Entries whose item isn't known yet, by the directory id they are in.
-    waiting: Vec<(usize, Sum)>,
-}
-
-impl Tops {
-    fn add(&mut self, entry: &Entry, node: &Node) {
-        let sum = Sum::of(node);
-        let dir = entry.directory_id.map(|d| d.index());
-        if let Some(d) = dir
-            && self.top_of.len() <= d
-        {
-            self.top_of.resize(d + 1, None);
-            self.parent_of.resize(d + 1, None);
-        }
-        match (entry.depth, entry.parent_directory_id.map(|p| p.index())) {
-            (0, _) | (_, None) => {}
-            (1, _) => {
-                if let Some(d) = dir {
-                    self.top_of[d] = Some(self.items.len());
-                }
-                self.items.push(Top {
-                    name: node.name.clone(),
-                    dir: node.is_dir(),
-                    sum,
-                });
-            }
-            (_, Some(p)) => {
-                if let Some(d) = dir {
-                    self.parent_of[d] = Some(p);
-                    self.top_of[d] = self.top_of.get(p).copied().flatten();
-                }
-                self.credit(p, sum);
-            }
-        }
-    }
-
-    fn credit(&mut self, dir: usize, sum: Sum) {
-        match self.top_of.get(dir).copied().flatten() {
-            Some(t) => self.items[t].sum.add(&sum),
-            None => self.waiting.push((dir, sum)),
-        }
-    }
-
-    /// Places what's waiting wherever its chain up to the root is now complete.
-    fn settle(&mut self) {
-        for (dir, sum) in std::mem::take(&mut self.waiting) {
-            self.resolve(dir);
-            self.credit(dir, sum);
-        }
-    }
-
-    /// Finds the item `dir` belongs to and remembers it along the way; None while a link is
-    /// missing.
-    fn resolve(&mut self, dir: usize) -> Option<()> {
-        let mut chain = Vec::new();
-        let mut at = dir;
-        let top = loop {
-            if let Some(t) = self.top_of.get(at).copied().flatten() {
-                break t;
-            }
-            chain.push(at);
-            at = self.parent_of.get(at).copied().flatten()?;
-        };
-        for d in chain {
-            self.top_of[d] = Some(top);
-        }
-        Some(())
-    }
-
-    fn publish(&mut self, progress: &Progress) {
-        self.settle();
-        if let Ok(mut tops) = progress.tops.lock() {
-            tops.clone_from(&self.items);
-        }
+fn publish(live: &Live, progress: &Progress) {
+    if let Ok(mut nodes) = progress.live.lock() {
+        nodes.clone_from(&live.nodes);
+        progress.live_version.fetch_add(1, Relaxed);
     }
 }
 
@@ -316,7 +164,7 @@ pub fn scan(root: &Path, opts: &ScanOptions, progress: &Progress) -> ScanResult 
     let mut open_failures = 0usize;
     let mut seen_inodes: HashSet<(u64, u64)> = HashSet::new();
     let mut count = 0u64;
-    let mut tops = Tops::default();
+    let mut live = Live::default();
     let mut published = Instant::now();
 
     for item in walk {
@@ -359,9 +207,9 @@ pub fn scan(root: &Path, opts: &ScanOptions, progress: &Progress) -> ScanResult 
         }
         progress.bytes.fetch_add(node.size, Relaxed);
 
-        tops.add(&entry, &node);
-        if count.is_multiple_of(256) && published.elapsed() >= TOPS_EVERY {
-            tops.publish(progress);
+        live.add(&entry, &node);
+        if count.is_multiple_of(256) && published.elapsed() >= LIVE_EVERY {
+            publish(&live, progress);
             published = Instant::now();
         }
 
@@ -386,7 +234,7 @@ pub fn scan(root: &Path, opts: &ScanOptions, progress: &Progress) -> ScanResult 
         }
     }
 
-    tops.publish(progress);
+    publish(&live, progress);
     let cancelled = progress.is_cancelled();
     let Some(root_node) = root_node else {
         return finish_early(root, flag::DIR, None, start, cancelled);
@@ -715,56 +563,31 @@ mod tests {
     }
 
     #[test]
-    fn the_tree_so_far_ends_matching_the_items_under_the_root() {
+    fn the_tree_so_far_ends_matching_the_finished_tree() {
         let t = sample();
         let (r, p) = run(t.path(), &ScanOptions::default());
-        let level = |tree: &Tree| {
-            let mut items: Vec<_> = tree
-                .children(tree.root())
-                .iter()
-                .map(|&id| {
-                    let n = tree.node(id);
-                    (n.name.clone(), n.is_dir(), n.size, n.files, n.kind, n.mtime)
-                })
-                .collect();
-            items.sort_by(|a, b| a.0.cmp(&b.0));
-            items
-        };
         let so_far = p.tree_so_far(t.path());
-        assert_eq!(level(&so_far), level(&r.tree));
-        assert_eq!(
-            so_far.node(so_far.root()).size,
-            r.tree.node(r.tree.root()).size
-        );
-    }
-
-    #[test]
-    fn contents_that_arrive_before_their_folder_still_count() {
-        let mut tops = Tops {
-            top_of: vec![None; 4],
-            parent_of: vec![None; 4],
-            ..Default::default()
+        let facts = |tree: &Tree, id: NodeId| {
+            let n = tree.node(id);
+            (n.is_dir(), n.size, n.files, n.kind, n.mtime)
         };
-        // Dir 3 (under 2, under 1) reports 10 bytes before 2 or 1 is known.
-        let file = Sum {
-            bytes: 10,
-            files: 1,
-            ..Sum::default()
-        };
-        tops.credit(3, file);
-        tops.parent_of[3] = Some(2);
-        tops.settle();
-        assert_eq!(tops.waiting.len(), 1);
-        tops.parent_of[2] = Some(1);
-        tops.items.push(Top {
-            name: "a".into(),
-            dir: true,
-            sum: Sum::default(),
-        });
-        tops.top_of[1] = Some(0);
-        tops.settle();
-        assert!(tops.waiting.is_empty());
-        assert_eq!(tops.items[0].sum, file);
+        let mut seen = 0;
+        let mut stack = vec![so_far.root()];
+        while let Some(id) = stack.pop() {
+            let path = so_far.path(id);
+            let real = r.tree.find(&path).expect("in the finished tree");
+            assert_eq!(facts(&so_far, id), facts(&r.tree, real), "{path:?}");
+            stack.extend_from_slice(so_far.children(id));
+            seen += 1;
+        }
+        // Every folder (the sample is shallower than `live::DEPTH`) and the top-level files.
+        let top_files = r
+            .tree
+            .children(r.tree.root())
+            .iter()
+            .filter(|&&id| !r.tree.node(id).is_dir())
+            .count();
+        assert_eq!(seen, p.dirs.load(Relaxed) as usize + top_files);
     }
 
     /// Size and file count of every live node, by path.
