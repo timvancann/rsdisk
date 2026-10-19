@@ -43,20 +43,103 @@ pub struct Progress {
     cancel: AtomicBool,
 }
 
-/// Running totals for one item directly under the scan root, so the scan screen can show
-/// where the space is while the walk runs, as dua does.
+/// Running totals for one item directly under the scan root, so the window can show where
+/// the space is while the walk runs, as dua does.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct Top {
     pub name: Box<str>,
     pub dir: bool,
+    pub sum: Sum,
+}
+
+/// What a set of entries adds up to: what `Tree::summarize` would work out from them.
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq)]
+pub struct Sum {
     pub bytes: u64,
     pub files: u64,
+    /// File bytes by `Kind as usize`.
+    pub kinds: [u64; 8],
+    /// Modified time times size over the dated files, and their size.
+    pub dated: u128,
+    pub weight: u64,
+}
+
+impl Sum {
+    fn of(node: &Node) -> Sum {
+        let mut sum = Sum {
+            bytes: node.size,
+            ..Sum::default()
+        };
+        if !node.is_dir() {
+            sum.files = 1;
+            sum.kinds[node.kind as usize] = node.size;
+            if node.mtime > 0 {
+                sum.dated = node.mtime as u128 * node.size as u128;
+                sum.weight = node.size;
+            }
+        }
+        sum
+    }
+
+    fn add(&mut self, other: &Sum) {
+        self.bytes += other.bytes;
+        self.files += other.files;
+        for (a, b) in self.kinds.iter_mut().zip(other.kinds) {
+            *a += b;
+        }
+        self.dated += other.dated;
+        self.weight += other.weight;
+    }
 }
 
 impl Progress {
     /// The items under the root so far, in the order the walk met them.
     pub fn tops(&self) -> Vec<Top> {
         self.tops.lock().map(|t| t.clone()).unwrap_or_default()
+    }
+
+    /// The scan so far as a tree one level deep, for the window to show while the walk runs.
+    /// Folders get the kind and age their contents so far give them.
+    pub fn tree_so_far(&self, root: &Path) -> Tree {
+        let tops = self.tops();
+        let root_node = Node::new(root.to_string_lossy(), 0, 0, Kind::Other, flag::DIR);
+        let mut builder = TreeBuilder::with_capacity(root_node, tops.len() + 1);
+        builder.add_children(
+            0,
+            tops.iter().map(|t| {
+                let flags = if t.dir { flag::DIR } else { 0 };
+                let mut n = Node::new(t.name.clone(), t.sum.bytes, 0, Kind::Other, flags);
+                n.files = t.sum.files as u32;
+                n
+            }),
+        );
+        let mut tree = builder.finish();
+        // `finish` rolled sizes up but found no files to colour by; give each item its own.
+        let by_name: std::collections::HashMap<&str, &Sum> =
+            tops.iter().map(|t| (&*t.name, &t.sum)).collect();
+        let children = tree.children(tree.root()).to_vec();
+        for id in children {
+            let n = tree.node_mut(id);
+            let Some(sum) = by_name.get(&*n.name) else {
+                continue;
+            };
+            let (best, bytes) =
+                sum.kinds.iter().enumerate().fold(
+                    (7, 0),
+                    |best, (k, b)| {
+                        if *b > best.1 { (k, *b) } else { best }
+                    },
+                );
+            n.kind = if kind_of(&n.name) == Kind::App {
+                Kind::App
+            } else if bytes == 0 {
+                Kind::Other
+            } else {
+                Kind::ALL[best]
+            };
+            n.mtime = (sum.dated / sum.weight.max(1) as u128) as u32;
+        }
+        tree
     }
 
     /// A directory the scan recently passed through.
@@ -121,13 +204,13 @@ struct Tops {
     /// By walk directory id: the item it belongs to, and its parent's directory id.
     top_of: Vec<Option<usize>>,
     parent_of: Vec<Option<usize>>,
-    /// (directory id, bytes, files) for entries whose item isn't known yet.
-    waiting: Vec<(usize, u64, u64)>,
+    /// Entries whose item isn't known yet, by the directory id they are in.
+    waiting: Vec<(usize, Sum)>,
 }
 
 impl Tops {
     fn add(&mut self, entry: &Entry, node: &Node) {
-        let files = u64::from(!node.is_dir());
+        let sum = Sum::of(node);
         let dir = entry.directory_id.map(|d| d.index());
         if let Some(d) = dir
             && self.top_of.len() <= d
@@ -144,8 +227,7 @@ impl Tops {
                 self.items.push(Top {
                     name: node.name.clone(),
                     dir: node.is_dir(),
-                    bytes: node.size,
-                    files,
+                    sum,
                 });
             }
             (_, Some(p)) => {
@@ -153,26 +235,23 @@ impl Tops {
                     self.parent_of[d] = Some(p);
                     self.top_of[d] = self.top_of.get(p).copied().flatten();
                 }
-                self.credit(p, node.size, files);
+                self.credit(p, sum);
             }
         }
     }
 
-    fn credit(&mut self, dir: usize, bytes: u64, files: u64) {
+    fn credit(&mut self, dir: usize, sum: Sum) {
         match self.top_of.get(dir).copied().flatten() {
-            Some(t) => {
-                self.items[t].bytes += bytes;
-                self.items[t].files += files;
-            }
-            None => self.waiting.push((dir, bytes, files)),
+            Some(t) => self.items[t].sum.add(&sum),
+            None => self.waiting.push((dir, sum)),
         }
     }
 
     /// Places what's waiting wherever its chain up to the root is now complete.
     fn settle(&mut self) {
-        for (dir, bytes, files) in std::mem::take(&mut self.waiting) {
+        for (dir, sum) in std::mem::take(&mut self.waiting) {
             self.resolve(dir);
-            self.credit(dir, bytes, files);
+            self.credit(dir, sum);
         }
     }
 
@@ -636,27 +715,27 @@ mod tests {
     }
 
     #[test]
-    fn tops_match_the_items_under_the_root() {
+    fn the_tree_so_far_ends_matching_the_items_under_the_root() {
         let t = sample();
         let (r, p) = run(t.path(), &ScanOptions::default());
-        let tree = &r.tree;
-        let mut want: Vec<Top> = tree
-            .children(tree.root())
-            .iter()
-            .map(|&id| {
-                let n = tree.node(id);
-                Top {
-                    name: n.name.clone(),
-                    dir: n.is_dir(),
-                    bytes: n.size,
-                    files: n.files as u64,
-                }
-            })
-            .collect();
-        let mut got = p.tops();
-        want.sort_by(|a, b| a.name.cmp(&b.name));
-        got.sort_by(|a, b| a.name.cmp(&b.name));
-        assert_eq!(got, want);
+        let level = |tree: &Tree| {
+            let mut items: Vec<_> = tree
+                .children(tree.root())
+                .iter()
+                .map(|&id| {
+                    let n = tree.node(id);
+                    (n.name.clone(), n.is_dir(), n.size, n.files, n.kind, n.mtime)
+                })
+                .collect();
+            items.sort_by(|a, b| a.0.cmp(&b.0));
+            items
+        };
+        let so_far = p.tree_so_far(t.path());
+        assert_eq!(level(&so_far), level(&r.tree));
+        assert_eq!(
+            so_far.node(so_far.root()).size,
+            r.tree.node(r.tree.root()).size
+        );
     }
 
     #[test]
@@ -667,7 +746,12 @@ mod tests {
             ..Default::default()
         };
         // Dir 3 (under 2, under 1) reports 10 bytes before 2 or 1 is known.
-        tops.credit(3, 10, 1);
+        let file = Sum {
+            bytes: 10,
+            files: 1,
+            ..Sum::default()
+        };
+        tops.credit(3, file);
         tops.parent_of[3] = Some(2);
         tops.settle();
         assert_eq!(tops.waiting.len(), 1);
@@ -675,13 +759,12 @@ mod tests {
         tops.items.push(Top {
             name: "a".into(),
             dir: true,
-            bytes: 0,
-            files: 0,
+            sum: Sum::default(),
         });
         tops.top_of[1] = Some(0);
         tops.settle();
         assert!(tops.waiting.is_empty());
-        assert_eq!((tops.items[0].bytes, tops.items[0].files), (10, 1));
+        assert_eq!(tops.items[0].sum, file);
     }
 
     /// Size and file count of every live node, by path.

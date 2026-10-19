@@ -45,6 +45,13 @@ impl Browser {
         b
     }
 
+    /// The scan so far, shown while it runs: nothing is selected, since keys can't move yet.
+    pub fn so_far(result: ScanResult) -> Self {
+        let mut b = Self::new(result);
+        b.selected = None;
+        b
+    }
+
     pub fn result(&self) -> &ScanResult {
         &self.result
     }

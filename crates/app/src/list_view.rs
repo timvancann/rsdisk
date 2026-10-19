@@ -8,9 +8,11 @@ use crate::theme::MONO;
 use crate::view::{ROW_HEIGHT, RsDisk, grantee};
 use gpui_kit::{prelude::*, *};
 use rsdisk_core::format;
+use rsdisk_core::scan::Progress;
 use rsdisk_core::tree::flag;
 use std::ops::Range;
 use std::sync::atomic::Ordering::Relaxed;
+use std::time::Instant;
 
 const BAR_WIDTH: f32 = 80.;
 /// Breadcrumbs beyond the root and this many of the last ones collapse to an ellipsis.
@@ -42,10 +44,11 @@ const HELP: &[(&str, &str)] = &[
 ];
 
 impl RsDisk {
+    /// The browser, or with `scanning` the scan so far, under a header with its counters.
     pub fn render_browser(
         &self,
         b: &Browser,
-        _window: &mut Window,
+        scanning: Option<(&Progress, Instant)>,
         cx: &mut Context<Self>,
     ) -> impl IntoElement {
         let t = &self.theme;
@@ -55,7 +58,11 @@ impl RsDisk {
                 .px_4()
                 .py_3()
                 .text_color(rgb(t.dim))
-                .child("This folder is empty")
+                .child(if scanning.is_some() {
+                    "Nothing found yet"
+                } else {
+                    "This folder is empty"
+                })
                 .into_any_element()
         } else {
             uniform_list(
@@ -71,7 +78,12 @@ impl RsDisk {
             .size_full()
             .flex()
             .flex_col()
-            .child(self.render_header(b, cx))
+            .child(match scanning {
+                Some((progress, started)) => self
+                    .render_scan_header(progress, started)
+                    .into_any_element(),
+                None => self.render_header(b, cx).into_any_element(),
+            })
             .child(
                 div()
                     .flex_1()
@@ -213,9 +225,7 @@ impl RsDisk {
     }
 
     fn render_rows(&self, range: Range<usize>, cx: &mut Context<Self>) -> Vec<AnyElement> {
-        let Some(b) = self.browser() else {
-            return Vec::new();
-        };
+        let b = self.shown_browser();
         let t = &self.theme;
         let tree = b.tree();
         let folder_size = tree.node(b.folder()).size.max(1);

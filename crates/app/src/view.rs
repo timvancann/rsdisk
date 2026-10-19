@@ -32,6 +32,8 @@ pub enum Stage {
         progress: Arc<Progress>,
         started: Instant,
         done: Receiver<ScanResult>,
+        /// The items under the root so far, drawn like the browser (spec §3.2).
+        so_far: Box<Browser>,
     },
     Browsing(Browser),
 }
@@ -74,6 +76,17 @@ pub fn grantee() -> &'static str {
     let bundled =
         std::env::current_exe().is_ok_and(|p| p.to_string_lossy().contains(".app/Contents/MacOS/"));
     if bundled { "RSdisk" } else { "your terminal" }
+}
+
+/// The scan so far as a result the browser can draw.
+fn so_far(root: &Path, progress: &Progress) -> ScanResult {
+    ScanResult {
+        tree: progress.tree_so_far(root),
+        errors: Vec::new(),
+        elapsed: Duration::ZERO,
+        cancelled: false,
+        unlocated: 0,
+    }
 }
 
 fn is_dark(window: &Window) -> bool {
@@ -173,6 +186,7 @@ impl RsDisk {
             ScanOptions::for_home(home),
             progress.clone(),
         );
+        let so_far = Box::new(Browser::so_far(so_far(&root, &progress)));
         std::thread::spawn(move || {
             let _ = tx.send(scan(&root, &opts, &p));
         });
@@ -180,14 +194,21 @@ impl RsDisk {
             progress,
             started: Instant::now(),
             done: rx,
+            so_far,
         }
     }
 
     fn poll(&mut self, cx: &mut Context<Self>) {
-        if let Stage::Scanning { done, .. } = &self.stage {
+        if let Stage::Scanning {
+            done,
+            progress,
+            so_far: shown,
+            ..
+        } = &mut self.stage
+        {
             match done.try_recv() {
                 Ok(result) => self.browse(result),
-                Err(TryRecvError::Empty) => {}
+                Err(TryRecvError::Empty) => **shown = Browser::so_far(so_far(&self.root, progress)),
                 Err(TryRecvError::Disconnected) => return,
             }
             cx.notify();
@@ -219,6 +240,8 @@ impl RsDisk {
             self.located = Some(rx);
         }
         self.stage = Stage::Browsing(Browser::new(result));
+        // A hover over the scan-so-far points at its nodes, not the real tree's.
+        self.hover = None;
         self.reguard();
     }
 
@@ -234,6 +257,15 @@ impl RsDisk {
         match &self.stage {
             Stage::Browsing(b) => Some(b),
             Stage::Scanning { .. } => None,
+        }
+    }
+
+    /// What the list and visual draw: the browser, or the scan so far while it runs. Only
+    /// drawing uses this; keys and clicks act on `browser()`.
+    pub fn shown_browser(&self) -> &Browser {
+        match &self.stage {
+            Stage::Browsing(b) => b,
+            Stage::Scanning { so_far, .. } => so_far,
         }
     }
 
@@ -461,13 +493,18 @@ impl RsDisk {
 }
 
 impl Render for RsDisk {
-    fn render(&mut self, window: &mut Window, cx: &mut Context<Self>) -> impl IntoElement {
+    fn render(&mut self, _window: &mut Window, cx: &mut Context<Self>) -> impl IntoElement {
         let t = &self.theme;
         let body = match &self.stage {
             Stage::Scanning {
-                progress, started, ..
-            } => self.render_scanning(progress, *started).into_any_element(),
-            Stage::Browsing(b) => self.render_browser(b, window, cx).into_any_element(),
+                progress,
+                started,
+                so_far,
+                ..
+            } => self
+                .render_browser(so_far, Some((progress, *started)), cx)
+                .into_any_element(),
+            Stage::Browsing(b) => self.render_browser(b, None, cx).into_any_element(),
         };
         // Every selection change ends in a render, so this is where the preview follows it.
         if let Stage::Browsing(b) = &self.stage
