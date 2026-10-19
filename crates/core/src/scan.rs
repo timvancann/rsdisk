@@ -39,10 +39,26 @@ pub struct Progress {
     pub dirs: AtomicU64,
     pub bytes: AtomicU64,
     latest: Mutex<PathBuf>,
+    tops: Mutex<Vec<Top>>,
     cancel: AtomicBool,
 }
 
+/// Running totals for one item directly under the scan root, so the scan screen can show
+/// where the space is while the walk runs, as dua does.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct Top {
+    pub name: Box<str>,
+    pub dir: bool,
+    pub bytes: u64,
+    pub files: u64,
+}
+
 impl Progress {
+    /// The items under the root so far, in the order the walk met them.
+    pub fn tops(&self) -> Vec<Top> {
+        self.tops.lock().map(|t| t.clone()).unwrap_or_default()
+    }
+
     /// A directory the scan recently passed through.
     pub fn latest(&self) -> PathBuf {
         self.latest.lock().map(|p| p.clone()).unwrap_or_default()
@@ -89,9 +105,102 @@ pub fn crosses_volume(root_dev: u64, dev: u64) -> bool {
 /// How often (in entries) the consumer refreshes `Progress::latest`.
 const LATEST_EVERY: u64 = 4096;
 
+/// How often the consumer publishes `Progress::tops`.
+const TOPS_EVERY: Duration = Duration::from_millis(100);
+
 /// A listed entry waiting for the tree: its node, and its walk directory id when it is a
 /// directory that was entered.
 type Pending = (Node, Option<usize>);
+
+/// Adds each entry to the item under the root that holds it. The walk can hand over a
+/// folder's contents before the folder itself, so entries whose item isn't known yet wait,
+/// and `settle` places them once the chain up to the root has arrived.
+#[derive(Default)]
+struct Tops {
+    items: Vec<Top>,
+    /// By walk directory id: the item it belongs to, and its parent's directory id.
+    top_of: Vec<Option<usize>>,
+    parent_of: Vec<Option<usize>>,
+    /// (directory id, bytes, files) for entries whose item isn't known yet.
+    waiting: Vec<(usize, u64, u64)>,
+}
+
+impl Tops {
+    fn add(&mut self, entry: &Entry, node: &Node) {
+        let files = u64::from(!node.is_dir());
+        let dir = entry.directory_id.map(|d| d.index());
+        if let Some(d) = dir
+            && self.top_of.len() <= d
+        {
+            self.top_of.resize(d + 1, None);
+            self.parent_of.resize(d + 1, None);
+        }
+        match (entry.depth, entry.parent_directory_id.map(|p| p.index())) {
+            (0, _) | (_, None) => {}
+            (1, _) => {
+                if let Some(d) = dir {
+                    self.top_of[d] = Some(self.items.len());
+                }
+                self.items.push(Top {
+                    name: node.name.clone(),
+                    dir: node.is_dir(),
+                    bytes: node.size,
+                    files,
+                });
+            }
+            (_, Some(p)) => {
+                if let Some(d) = dir {
+                    self.parent_of[d] = Some(p);
+                    self.top_of[d] = self.top_of.get(p).copied().flatten();
+                }
+                self.credit(p, node.size, files);
+            }
+        }
+    }
+
+    fn credit(&mut self, dir: usize, bytes: u64, files: u64) {
+        match self.top_of.get(dir).copied().flatten() {
+            Some(t) => {
+                self.items[t].bytes += bytes;
+                self.items[t].files += files;
+            }
+            None => self.waiting.push((dir, bytes, files)),
+        }
+    }
+
+    /// Places what's waiting wherever its chain up to the root is now complete.
+    fn settle(&mut self) {
+        for (dir, bytes, files) in std::mem::take(&mut self.waiting) {
+            self.resolve(dir);
+            self.credit(dir, bytes, files);
+        }
+    }
+
+    /// Finds the item `dir` belongs to and remembers it along the way; None while a link is
+    /// missing.
+    fn resolve(&mut self, dir: usize) -> Option<()> {
+        let mut chain = Vec::new();
+        let mut at = dir;
+        let top = loop {
+            if let Some(t) = self.top_of.get(at).copied().flatten() {
+                break t;
+            }
+            chain.push(at);
+            at = self.parent_of.get(at).copied().flatten()?;
+        };
+        for d in chain {
+            self.top_of[d] = Some(top);
+        }
+        Some(())
+    }
+
+    fn publish(&mut self, progress: &Progress) {
+        self.settle();
+        if let Ok(mut tops) = progress.tops.lock() {
+            tops.clone_from(&self.items);
+        }
+    }
+}
 
 pub fn scan(root: &Path, opts: &ScanOptions, progress: &Progress) -> ScanResult {
     let start = Instant::now();
@@ -128,6 +237,8 @@ pub fn scan(root: &Path, opts: &ScanOptions, progress: &Progress) -> ScanResult 
     let mut open_failures = 0usize;
     let mut seen_inodes: HashSet<(u64, u64)> = HashSet::new();
     let mut count = 0u64;
+    let mut tops = Tops::default();
+    let mut published = Instant::now();
 
     for item in walk {
         if progress.is_cancelled() {
@@ -169,6 +280,12 @@ pub fn scan(root: &Path, opts: &ScanOptions, progress: &Progress) -> ScanResult 
         }
         progress.bytes.fetch_add(node.size, Relaxed);
 
+        tops.add(&entry, &node);
+        if count.is_multiple_of(256) && published.elapsed() >= TOPS_EVERY {
+            tops.publish(progress);
+            published = Instant::now();
+        }
+
         if node.is_dir() && !is_root && opts.skip.contains(&entry.path()) {
             node.flags |= flag::NOT_SCANNED;
         }
@@ -190,6 +307,7 @@ pub fn scan(root: &Path, opts: &ScanOptions, progress: &Progress) -> ScanResult 
         }
     }
 
+    tops.publish(progress);
     let cancelled = progress.is_cancelled();
     let Some(root_node) = root_node else {
         return finish_early(root, flag::DIR, None, start, cancelled);
@@ -515,6 +633,55 @@ mod tests {
         assert_eq!(p.bytes.load(Relaxed), root.size);
         // a, a/b, a/b/c, d, empty, plus the root itself.
         assert_eq!(p.dirs.load(Relaxed), 6);
+    }
+
+    #[test]
+    fn tops_match_the_items_under_the_root() {
+        let t = sample();
+        let (r, p) = run(t.path(), &ScanOptions::default());
+        let tree = &r.tree;
+        let mut want: Vec<Top> = tree
+            .children(tree.root())
+            .iter()
+            .map(|&id| {
+                let n = tree.node(id);
+                Top {
+                    name: n.name.clone(),
+                    dir: n.is_dir(),
+                    bytes: n.size,
+                    files: n.files as u64,
+                }
+            })
+            .collect();
+        let mut got = p.tops();
+        want.sort_by(|a, b| a.name.cmp(&b.name));
+        got.sort_by(|a, b| a.name.cmp(&b.name));
+        assert_eq!(got, want);
+    }
+
+    #[test]
+    fn contents_that_arrive_before_their_folder_still_count() {
+        let mut tops = Tops {
+            top_of: vec![None; 4],
+            parent_of: vec![None; 4],
+            ..Default::default()
+        };
+        // Dir 3 (under 2, under 1) reports 10 bytes before 2 or 1 is known.
+        tops.credit(3, 10, 1);
+        tops.parent_of[3] = Some(2);
+        tops.settle();
+        assert_eq!(tops.waiting.len(), 1);
+        tops.parent_of[2] = Some(1);
+        tops.items.push(Top {
+            name: "a".into(),
+            dir: true,
+            bytes: 0,
+            files: 0,
+        });
+        tops.top_of[1] = Some(0);
+        tops.settle();
+        assert!(tops.waiting.is_empty());
+        assert_eq!((tops.items[0].bytes, tops.items[0].files), (10, 1));
     }
 
     /// Size and file count of every live node, by path.

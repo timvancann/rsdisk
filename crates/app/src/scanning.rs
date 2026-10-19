@@ -1,12 +1,17 @@
-//! The scan screen: live counters while the walk runs (spec §2.6).
+//! The scan screen: live counters and the items under the root as they fill in, like dua
+//! (spec §2.6).
 
 use crate::theme::MONO;
-use crate::view::RsDisk;
+use crate::view::{ROW_HEIGHT, RsDisk};
 use gpui_kit::*;
 use rsdisk_core::format;
 use rsdisk_core::scan::Progress;
 use std::sync::atomic::Ordering::Relaxed;
 use std::time::Instant;
+
+/// The largest items under the root the scan screen lists; the rest are counted.
+const TOPS_SHOWN: usize = 12;
+const BAR_WIDTH: f32 = 80.;
 
 /// `3906896` as `3,906,896`.
 pub fn count(n: u64) -> String {
@@ -34,6 +39,68 @@ impl RsDisk {
                 .child(div().text_color(rgb(t.dim)).child(label.to_string()))
                 .child(div().font_family(MONO).text_size(px(22.)).child(value))
         };
+        let total = progress.bytes.load(Relaxed).max(1);
+        let mut tops = progress.tops();
+        tops.sort_by_key(|t| std::cmp::Reverse(t.bytes));
+        let more = tops.len().saturating_sub(TOPS_SHOWN);
+        let mut list = div().w(px(720.)).flex().flex_col();
+        for top in tops.iter().take(TOPS_SHOWN) {
+            let share = top.bytes as f32 / total as f32;
+            let name = if top.dir {
+                format!("{}/", top.name)
+            } else {
+                top.name.to_string()
+            };
+            list = list.child(
+                div()
+                    .h(px(ROW_HEIGHT))
+                    .flex()
+                    .items_center()
+                    .gap_3()
+                    .child(div().flex_1().min_w_0().truncate().child(name))
+                    .child(
+                        div()
+                            .w(px(BAR_WIDTH))
+                            .h(px(6.))
+                            .rounded_sm()
+                            .bg(rgb(t.faint))
+                            .child(
+                                div()
+                                    .h_full()
+                                    .rounded_sm()
+                                    .w(px(BAR_WIDTH * share.clamp(0., 1.)))
+                                    .bg(rgb(t.accent)),
+                            ),
+                    )
+                    .child(
+                        div()
+                            .w(px(84.))
+                            .flex()
+                            .justify_end()
+                            .font_family(MONO)
+                            .child(format::bytes(top.bytes)),
+                    )
+                    .child(
+                        div()
+                            .w(px(84.))
+                            .flex()
+                            .justify_end()
+                            .font_family(MONO)
+                            .text_color(rgb(t.dim))
+                            .child(count(top.files)),
+                    ),
+            );
+        }
+        if more > 0 {
+            list = list.child(
+                div()
+                    .h(px(ROW_HEIGHT))
+                    .flex()
+                    .items_center()
+                    .text_color(rgb(t.dim))
+                    .child(format!("and {} more", count(more as u64))),
+            );
+        }
         let latest = progress.latest();
         let shown = latest
             .strip_prefix(&self.root)
@@ -63,6 +130,7 @@ impl RsDisk {
                         format!("{:.1} s", started.elapsed().as_secs_f32()),
                     )),
             )
+            .child(list)
             .child(
                 div()
                     .w(px(640.))

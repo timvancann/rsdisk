@@ -104,7 +104,11 @@ which sits behind a small trait so tests can run without touching the real Trash
 - The scanning thread applies the size rules (§3.4), groups entries by the walk's directory
   ids, and lays them out as the tree (§3.3) when the walk ends.
 - Progress: shared atomic counters (files, dirs, bytes) plus a slot holding a recent path,
-  which the UI polls a few times a second. Cancelling sets an atomic flag; the scanning thread
+  which the UI polls a few times a second. Like dua, the scan screen also lists the items
+  under the root with their size so far: the scanning thread adds each entry to the item that
+  holds it and publishes those totals every 100 ms. The walk can deliver a folder's contents
+  before the folder itself, so such entries wait until the chain up to the root is known.
+  Cancelling sets an atomic flag; the scanning thread
   stops consuming and dropping the walk stops its workers.
 - dua-core reports a directory it couldn't open without saying which one. The scan result
   carries their count (`unlocated`), and `locate_unreadable` finds them afterwards by
