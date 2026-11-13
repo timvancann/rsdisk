@@ -15,7 +15,7 @@ pub struct Marks {
 impl Marks {
     /// Marks or unmarks `id`, or returns why it can't be marked. The root can't be marked,
     /// nor a guarded item or a folder holding one; an item inside a marked folder is already
-    /// covered, and marking a folder drops the marks inside it.
+    /// covered (and says so), and marking a folder drops the marks inside it.
     pub fn toggle(&mut self, tree: &Tree, id: NodeId) -> Option<String> {
         if id == tree.root() || tree.node(id).has(flag::REMOVED) {
             return None;
@@ -23,8 +23,12 @@ impl Marks {
         if self.ids.remove(&id) {
             return None;
         }
-        if self.covered_by_ancestor(tree, id) {
-            return None;
+        if let Some(folder) = self.marked_ancestor(tree, id) {
+            return Some(format!(
+                "{} is inside {}, which is marked as a whole",
+                tree.node(id).name,
+                tree.node(folder).name
+            ));
         }
         if let Some(why) = self.refusal(tree, id) {
             return Some(why);
@@ -115,14 +119,31 @@ impl Marks {
     }
 
     fn covered_by_ancestor(&self, tree: &Tree, id: NodeId) -> bool {
+        self.marked_ancestor(tree, id).is_some()
+    }
+
+    fn marked_ancestor(&self, tree: &Tree, id: NodeId) -> Option<NodeId> {
         let mut at = tree.node(id).parent();
         while let Some(p) = at {
             if self.ids.contains(&p) {
-                return true;
+                return Some(p);
             }
             at = tree.node(p).parent();
         }
-        false
+        None
+    }
+
+    /// What a right-click on `id` would do, for the visual's tooltip.
+    pub fn hint(&self, tree: &Tree, id: NodeId) -> &'static str {
+        if self.is_marked(id) {
+            "right-click unmarks"
+        } else if self.covered_by_ancestor(tree, id) {
+            "inside a marked folder"
+        } else if self.refusal(tree, id).is_some() {
+            "can't be marked"
+        } else {
+            "right-click marks"
+        }
     }
 
     /// The marked nodes still in the tree.
@@ -220,8 +241,19 @@ mod tests {
         let (t, [a, _, x, _]) = tree();
         let mut m = Marks::default();
         m.toggle(&t, a);
-        m.toggle(&t, x);
+        let why = m.toggle(&t, x).expect("says why nothing changed");
+        assert!(why.contains("marked as a whole"), "{why}");
         assert_eq!(m.ids(&t), [a]);
+    }
+
+    #[test]
+    fn the_hint_says_what_a_right_click_would_do() {
+        let (t, [a, _, x, _]) = tree();
+        let mut m = Marks::default();
+        assert_eq!(m.hint(&t, x), "right-click marks");
+        m.toggle(&t, a);
+        assert_eq!(m.hint(&t, a), "right-click unmarks");
+        assert_eq!(m.hint(&t, x), "inside a marked folder");
     }
 
     #[test]

@@ -377,6 +377,25 @@ impl RsDisk {
         });
     }
 
+    /// A right-click marks the item under the pointer, however deep (spec §3.9).
+    fn mark_in_visual(&mut self, pos: Point<Pixels>, cx: &mut Context<Self>) {
+        // The scan so far can't be marked: its nodes aren't the finished tree's.
+        if self.browser().is_none() {
+            return;
+        }
+        self.note = None;
+        match self.target_at(pos) {
+            Some(Target::Node(id)) => self.toggle_mark_of(id),
+            Some(Target::Rest(_)) => {
+                self.note = Some(
+                    "Small items can't be marked together; open the folder to mark them".into(),
+                )
+            }
+            Some(Target::Centre) | None => return,
+        }
+        cx.notify();
+    }
+
     pub fn render_visual(&self, b: &Browser, cx: &mut Context<Self>) -> impl IntoElement {
         let t = &self.theme;
         if b.rows().is_empty() {
@@ -421,6 +440,12 @@ impl RsDisk {
                     .on_click(cx.listener(|view, e: &ClickEvent, _, cx| {
                         view.click_visual(e.position(), e.click_count(), cx)
                     }))
+                    .on_mouse_down(
+                        MouseButton::Right,
+                        cx.listener(|view, e: &MouseDownEvent, _, cx| {
+                            view.mark_in_visual(e.position, cx)
+                        }),
+                    )
                     .child(
                         canvas(
                             |_, _, _| {},
@@ -456,6 +481,10 @@ impl RsDisk {
             }
             Target::Node(id) => self.describe(tree, id),
         };
+        let hint = match hover.target {
+            Target::Node(id) if self.browser().is_some() => Some(self.marks.hint(tree, id)),
+            _ => None,
+        };
         // Deferred, so it paints above the legend and the rest of the window; in the lower
         // half of the pane it opens upwards, away from the window's bottom edge.
         let lower = hover.at.y > bounds.origin.y + bounds.size.height / 2.;
@@ -474,7 +503,14 @@ impl RsDisk {
             .border_color(rgb(t.faint))
             .text_size(px(12.))
             .child(div().font_family(MONO).child(title))
-            .child(div().text_color(rgb(t.dim)).child(detail));
+            .child(div().text_color(rgb(t.dim)).child(detail))
+            .children(hint.map(|h| {
+                div()
+                    .pt_1()
+                    .text_size(px(11.))
+                    .text_color(rgb(t.dim))
+                    .child(h)
+            }));
         Some(
             deferred(
                 anchored()
@@ -547,26 +583,12 @@ impl RsDisk {
                 row = row.child(swatch(t.dim, "age unknown".into()));
             }
         }
-        let visual = match self.settings.visual {
-            Visual::Treemap => "treemap",
-            Visual::Sunburst => "sunburst",
-        };
-        // The keys get their own slot on the right, so they don't move as the swatches wrap.
         div()
-            .flex()
-            .items_start()
-            .justify_between()
-            .gap_3()
             .px_3()
             .pb_2()
             .text_size(px(11.))
             .text_color(rgb(t.dim))
             .child(row.child(swatch(t.small_items(), "small items".into())))
-            .child(
-                div()
-                    .flex_shrink_0()
-                    .child(format!("v: {visual}, a: colour, ?: keys")),
-            )
     }
 }
 

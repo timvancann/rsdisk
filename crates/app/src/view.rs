@@ -25,7 +25,7 @@ use std::sync::mpsc::{Receiver, TryRecvError, channel};
 use std::time::{Duration, Instant};
 
 const POLL: Duration = Duration::from_millis(100);
-pub const ROW_HEIGHT: f32 = 26.;
+pub const ROW_HEIGHT: f32 = 32.;
 
 pub enum Stage {
     Scanning {
@@ -527,6 +527,7 @@ impl Render for RsDisk {
             .size_full()
             .bg(rgb(t.bg))
             .text_color(rgb(t.text))
+            .font_family(theme::UI)
             .text_size(px(13.))
             .child(body)
     }

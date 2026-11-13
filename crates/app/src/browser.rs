@@ -12,16 +12,6 @@ pub enum Sort {
     Files,
 }
 
-impl Sort {
-    pub fn label(self) -> &'static str {
-        match self {
-            Sort::Size => "size",
-            Sort::Name => "name",
-            Sort::Files => "files",
-        }
-    }
-}
-
 pub struct Browser {
     result: ScanResult,
     folder: NodeId,
@@ -189,11 +179,16 @@ impl Browser {
     }
 
     pub fn cycle_sort(&mut self) {
-        self.sort = match self.sort {
+        self.set_sort(match self.sort {
             Sort::Size => Sort::Name,
             Sort::Name => Sort::Files,
             Sort::Files => Sort::Size,
-        };
+        });
+    }
+
+    /// A click on a column header.
+    pub fn set_sort(&mut self, sort: Sort) {
+        self.sort = sort;
         self.refresh();
     }
 
@@ -350,6 +345,20 @@ mod tests {
                 .unwrap()
         );
         b.cycle_sort();
+        assert_eq!(b.sort(), Sort::Size);
+        assert_eq!(b.selected(), Some(alpha));
+    }
+
+    #[test]
+    fn a_header_click_sorts_by_its_column() {
+        let (mut b, [_, alpha, ..]) = browser();
+        b.jump_to(alpha);
+        b.set_sort(Sort::Name);
+        assert_eq!(b.sort(), Sort::Name);
+        assert_eq!(b.selected(), Some(alpha));
+        assert_eq!(b.rows()[0], alpha);
+        // Straight to a column, not the next one in `s`'s cycle (which would be Files).
+        b.set_sort(Sort::Size);
         assert_eq!(b.sort(), Sort::Size);
         assert_eq!(b.selected(), Some(alpha));
     }

@@ -25,6 +25,7 @@ fn main() {
         .with_assets(gpui_kit::assets::Assets)
         .run(move |cx: &mut App| {
             gpui_kit::init(cx);
+            rsdisk_app::theme::load_fonts(cx);
             let bounds = Bounds::centered(None, size(px(1200.), px(780.)), cx);
             let title = format!("rsdisk: {}", root.display());
             let (_, main) = gpui_kit::open_window(

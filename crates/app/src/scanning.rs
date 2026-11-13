@@ -43,16 +43,22 @@ impl RsDisk {
             .flex_col()
             .gap_1()
             .px_4()
-            .py_2()
+            .pt_3()
+            .pb_2p5()
             .border_b_1()
             .border_color(rgb(t.faint))
             .child(
                 div()
-                    .font_family(MONO)
-                    .font_weight(FontWeight::SEMIBOLD)
+                    .text_size(px(16.))
+                    .font_weight(FontWeight::MEDIUM)
                     .child(self.root.display().to_string()),
             )
-            .child(div().text_color(rgb(t.dim)).child(counters))
+            .child(
+                div()
+                    .text_size(px(12.))
+                    .text_color(rgb(t.dim))
+                    .child(counters),
+            )
             .child(
                 div()
                     .text_color(rgb(t.dim))

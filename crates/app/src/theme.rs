@@ -2,6 +2,7 @@
 //! on this Mac, mapped onto rsdisk's colour roles. The loading is copied from riff
 //! (`~/repos/private/riff/src/theme.rs`), minus its loop and section roles.
 
+use gpui_kit::component::scroll::ScrollbarMode;
 use gpui_kit::component::{Theme as UiTheme, ThemeMode};
 use gpui_kit::{App, Hsla, Window, rgb};
 use rsdisk_core::kind::Kind;
@@ -53,8 +54,34 @@ impl Theme {
     }
 }
 
-/// The rsdisk monospace face, for paths and numbers.
-pub const MONO: &str = "Menlo";
+/// The interface face, Odeion's: names, labels and sentences.
+pub const UI: &str = "Space Grotesk";
+/// The monospace face, for paths, sizes and counts.
+pub const MONO: &str = "JetBrains Mono";
+
+/// Embeds both faces, so rsdisk looks the same on any Mac. Both are OFL-licensed, their
+/// licences beside them in `assets/fonts/`.
+pub fn load_fonts(cx: &App) {
+    use std::borrow::Cow;
+    let fonts: Vec<Cow<'static, [u8]>> = vec![
+        Cow::Borrowed(include_bytes!(
+            "../../../assets/fonts/SpaceGrotesk-Regular.ttf"
+        )),
+        Cow::Borrowed(include_bytes!(
+            "../../../assets/fonts/SpaceGrotesk-Medium.ttf"
+        )),
+        Cow::Borrowed(include_bytes!(
+            "../../../assets/fonts/JetBrainsMono-Regular.ttf"
+        )),
+        Cow::Borrowed(include_bytes!(
+            "../../../assets/fonts/JetBrainsMono-Medium.ttf"
+        )),
+    ];
+    // Without them text falls back to the system fonts, which still works; say why.
+    if let Err(e) = cx.text_system().add_fonts(fonts) {
+        eprintln!("rsdisk: couldn't load the bundled fonts, using the system's: {e}");
+    }
+}
 
 fn luma(c: u32) -> u32 {
     let (r, g, b) = ((c >> 16) & 0xff, (c >> 8) & 0xff, c & 0xff);
@@ -253,7 +280,12 @@ pub fn apply(theme: &Theme, window: Option<&mut Window>, cx: &mut App) {
         ThemeMode::Light
     };
     UiTheme::change(mode, window, cx);
-    let c = &mut UiTheme::global_mut(cx).colors;
+    let ui = UiTheme::global_mut(cx);
+    ui.font_family = UI.into();
+    ui.mono_font_family = MONO.into();
+    // The list's scrollbar shows how far down you are, so it never fades out.
+    ui.scrollbar_mode = ScrollbarMode::Always;
+    let c = &mut ui.colors;
     c.background = hsla(theme.bg);
     c.foreground = hsla(theme.text);
     c.muted = hsla(theme.surface);
@@ -271,7 +303,8 @@ pub fn apply(theme: &Theme, window: Option<&mut Window>, cx: &mut App) {
     c.selection = hsla(blend(theme.accent, theme.bg, 0.35));
     c.danger = hsla(theme.error);
     c.scrollbar = hsla(theme.bg);
-    c.scrollbar_thumb = hsla(theme.faint);
+    c.scrollbar_thumb = hsla(blend(theme.dim, theme.bg, 0.45));
+    c.scrollbar_thumb_hover = hsla(theme.dim);
     c.title_bar = hsla(theme.surface);
     c.title_bar_border = hsla(theme.faint);
 }

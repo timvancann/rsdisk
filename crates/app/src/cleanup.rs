@@ -41,6 +41,16 @@ impl RsDisk {
         }
     }
 
+    /// A right-click on a row or a cell: marks or unmarks exactly that item, at any depth,
+    /// leaving the selection where it is.
+    pub(crate) fn toggle_mark_of(&mut self, id: NodeId) {
+        if let Stage::Browsing(b) = &self.stage
+            && let Some(why) = self.marks.toggle(b.tree(), id)
+        {
+            self.note = Some(why);
+        }
+    }
+
     /// `d`: review the marked items. Not during a rescan: its result was read before Finder
     /// moves anything, so grafting it would bring trashed items back.
     pub fn open_confirm(&mut self) {

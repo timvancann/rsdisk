@@ -198,6 +198,16 @@ Exported JSON holds personal paths and is gitignored.
   a solid outline; warnings have their own colour.
 - Marked items get their own pane along the bottom, shown only while anything is marked:
   "N items, X GB", with `d` to review and trash and `u` to clear.
+- The list has a header row (Name, Size, Files) laid out like its rows; the current sort
+  is lit, and a click on a column sorts by it. Its scrollbar is always shown (it never
+  fades), so a long folder shows how far down you are; it can be dragged.
+- A key bar along the window's bottom edge shows the keys used most (while the first scan
+  runs, the few that work then), with `?` for the full sheet, grouped by what the keys do.
+  Its `v` and `a` entries name the current visual and colour mode, which the legend under
+  the visual used to say.
+- Type: Space Grotesk for the interface and JetBrains Mono for paths, sizes and counts,
+  both embedded (as in Odeion). The folder's name is the largest line, its size leads the
+  totals in the text colour, and the rest of the header is small and dim.
 
 ### 3.9 Keys and mouse
 
@@ -214,7 +224,11 @@ Starting set, refined during the GUI plans:
   selection while open (again closes it), `e` list the unreadable folders,
   `?` help, `q` quit.
 - `Esc` stops a rescan, else closes the preview, else forgets the last search's results.
-- Mouse: click selects, double-click opens, clicking a cell in the visual selects that item.
+- Mouse: click selects, double-click opens, clicking a cell in the visual selects that item
+  (or the item of the current folder it lies in). A right-click on a row or a cell marks or
+  unmarks exactly that item, however deep, without moving the selection; the tooltip says
+  what it would do. A "small items" cell, an item inside a marked folder and what §3.5
+  guards answer with a note instead. While the first scan runs, clicks do nothing.
   Dialogs have buttons, search results can be clicked, and overlays block clicks to what is
   behind them.
 
